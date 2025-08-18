@@ -1,0 +1,10 @@
+set shell := ["bash", "-uc"]
+
+build:
+    wasm-pack build --target web
+
+serve:
+    python3 -m http.server 8082
+
+doit: build
+    just serve

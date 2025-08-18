@@ -4,9 +4,99 @@ use smoldot::libp2p::{
     PeerId,
 };
 
-use rand::{rngs::StdRng, SeedableRng as _};
-use rand::RngCore;
-use std::time::Instant;
+use rand::{RngCore, rngs::StdRng, SeedableRng};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+use web_sys::console;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(catch)]
+    async fn dialWebRtcDirect(addr: String, glue: JsValue) -> Result<JsValue, JsValue>;
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub async fn run_client(peer_address: String) -> Result<String, String> {
+    console::log_1(&format!("Dialing: {}", peer_address).into());
+
+    // Build the glue object that JS will call back into.
+    // Replace the stubs with real Smoldot integration: feed bytes in/out of the state machine.
+    let glue = js_sys::Object::new();
+
+    // onOpen(localCertSha256)
+    {
+        let func = Closure::<dyn Fn(js_sys::Uint8Array)>::new(move |local_sha256: js_sys::Uint8Array| {
+            let mut bytes = vec![0u8; local_sha256.length() as usize];
+            local_sha256.copy_to(&mut bytes[..]);
+            console::log_1(&format!("Local DTLS cert sha256: {:02x?}", bytes).into());
+            // TODO: Initialize Smoldot connection here if needed.
+        });
+        js_sys::Reflect::set(
+            &glue,
+            &JsValue::from_str("onOpen"),
+            func.as_ref().unchecked_ref(),
+        )
+            .unwrap();
+        func.forget();
+    }
+
+    // onMessage(data)
+    {
+        let func = Closure::<dyn Fn(js_sys::Uint8Array)>::new(move |data: js_sys::Uint8Array| {
+            let mut bytes = vec![0u8; data.length() as usize];
+            data.copy_to(&mut bytes[..]);
+            // TODO: Feed 'bytes' into Smoldot's connection read_write().incoming_buffer, then drive the state.
+            console::log_1(&format!("RX {} bytes", bytes.len()).into());
+        });
+        js_sys::Reflect::set(
+            &glue,
+            &JsValue::from_str("onMessage"),
+            func.as_ref().unchecked_ref(),
+        )
+            .unwrap();
+        func.forget();
+    }
+
+    // nextOutbound() -> Uint8Array|null
+    {
+        let func = Closure::<dyn Fn() -> JsValue>::new(move || {
+            // TODO: Pull next outbound chunk from Smoldot (e.g., drain write_buffers)
+            // For now, return null to indicate no data to send.
+            JsValue::NULL
+        });
+        js_sys::Reflect::set(
+            &glue,
+            &JsValue::from_str("nextOutbound"),
+            func.as_ref().unchecked_ref(),
+        )
+            .unwrap();
+        func.forget();
+    }
+
+    // onClose(reason?)
+    {
+        let func = Closure::<dyn Fn(JsValue)>::new(move |reason| {
+            console::log_1(&format!("Closed: {:?}", reason).into());
+            // TODO: Propagate shutdown to Smoldot state machine if needed.
+        });
+        js_sys::Reflect::set(
+            &glue,
+            &JsValue::from_str("onClose"),
+            func.as_ref().unchecked_ref(),
+        )
+            .unwrap();
+        func.forget();
+    }
+
+    dialWebRtcDirect(peer_address, JsValue::from(glue))
+        .await
+        .map_err(|e| format!("Dial error: {:?}", e))?;
+
+    Ok("WebRTC-direct dialing started".to_owned())
+}
 
 // step 1: build the noise prologue
 // build the noise prologue for libp2p WebRTC.
@@ -136,7 +226,7 @@ pub fn handshake_with_webrtc_dc(
     );
 
     let mut rw = ReadWrite {
-        now: Instant::now(),
+        now: 0u64, // this is for WASM compatibility
         incoming_buffer: Vec::new(),
         expected_incoming_bytes: Some(0),
         read_bytes: 0,
@@ -169,6 +259,7 @@ pub fn handshake_with_webrtc_dc(
 
 // simulate a local connection with two peers and sends bytes between them
 mod demo {
+    use std::str::FromStr;
     use super::*;
 
     // to mimics the post-DataChannel steps smoldot performs:
@@ -225,7 +316,7 @@ mod demo {
     }
 
     // simulate the e2e local handshake
-    pub fn run() {
+    pub fn run() -> Result<String, String> {
         let mut rng = StdRng::seed_from_u64(42);
 
         // address generation and noise key generation
@@ -246,7 +337,7 @@ mod demo {
         let mut ws_a = WebRtcHandshaker::new(true, cert_sha256_a, cert_sha256_b, &noise_key_a, random_32(&mut rng));
         let mut ws_b = WebRtcHandshaker::new(false, cert_sha256_b, cert_sha256_a, &noise_key_b, random_32(&mut rng));
 
-        let now = Instant::now();
+        let now = 0u64;
         let mut pipe: Duplex<_> = Duplex::new(now, 128 * 1024);
 
         for step in 0..10_000 {
@@ -255,23 +346,15 @@ mod demo {
             let _ = ws_b.drive_once(&mut pipe.b);
             pipe.pump();
             if ws_a.is_finished() && ws_b.is_finished() {
-                println!(
+                let msg = format!(
                     "Both sides established after {} steps; A sees {}, B sees {}",
                     step,
                     ws_a.remote_peer_id.unwrap(),
                     ws_b.remote_peer_id.unwrap()
                 );
-                return;
+                return Ok(msg);
             }
         }
-        eprintln!("Handshake did not complete in time");
-        std::process::exit(1);
+        Err("Handshake did not complete in time".to_string())
     }
-}
-
-// TODO: add a real connection with a real DataChannel
-// then call handshake_with_webrtc_dc method
-
-fn main() {
-    demo::run();
 }
