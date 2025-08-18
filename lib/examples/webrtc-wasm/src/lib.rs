@@ -4,9 +4,27 @@ use smoldot::libp2p::{
     PeerId,
 };
 
-use rand::{rngs::StdRng, SeedableRng as _};
-use rand::RngCore;
-use std::time::Instant;
+use rand::{RngCore, rngs::StdRng, SeedableRng};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn run_webrtc_demo() -> Result<String, JsValue> {
+    demo::run().map_err(|e| JsValue::from_str(&e))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {
+    match demo::run() {
+        Ok(msg) => println!("{}", msg),
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
 
 // step 1: build the noise prologue
 // build the noise prologue for libp2p WebRTC.
@@ -136,7 +154,7 @@ pub fn handshake_with_webrtc_dc(
     );
 
     let mut rw = ReadWrite {
-        now: Instant::now(),
+        now: 0u64, // this is for WASM compatibility
         incoming_buffer: Vec::new(),
         expected_incoming_bytes: Some(0),
         read_bytes: 0,
@@ -225,7 +243,7 @@ mod demo {
     }
 
     // simulate the e2e local handshake
-    pub fn run() {
+    pub fn run() -> Result<String, String> {
         let mut rng = StdRng::seed_from_u64(42);
 
         // address generation and noise key generation
@@ -246,7 +264,7 @@ mod demo {
         let mut ws_a = WebRtcHandshaker::new(true, cert_sha256_a, cert_sha256_b, &noise_key_a, random_32(&mut rng));
         let mut ws_b = WebRtcHandshaker::new(false, cert_sha256_b, cert_sha256_a, &noise_key_b, random_32(&mut rng));
 
-        let now = Instant::now();
+        let now = 0u64;
         let mut pipe: Duplex<_> = Duplex::new(now, 128 * 1024);
 
         for step in 0..10_000 {
@@ -255,23 +273,22 @@ mod demo {
             let _ = ws_b.drive_once(&mut pipe.b);
             pipe.pump();
             if ws_a.is_finished() && ws_b.is_finished() {
-                println!(
+                let msg = format!(
                     "Both sides established after {} steps; A sees {}, B sees {}",
                     step,
                     ws_a.remote_peer_id.unwrap(),
                     ws_b.remote_peer_id.unwrap()
                 );
-                return;
+                web_sys::console::log_1(&msg.clone().into());
+                return Ok(msg);
             }
         }
-        eprintln!("Handshake did not complete in time");
-        std::process::exit(1);
+        let err = "Handshake did not complete in time".to_string();
+        web_sys::console::error_1(&err.clone().into());
+        Err(err)
     }
 }
 
 // TODO: add a real connection with a real DataChannel
 // then call handshake_with_webrtc_dc method
 
-fn main() {
-    demo::run();
-}

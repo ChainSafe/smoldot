@@ -49,3 +49,12 @@ code: tasks.rs L299  Webrtc_framing.rs L70
 WebRTC connections or individual channels are reset via the platform’s reset hook; for WebRTC, write sides are not gracefully closed. streams are abruptly destroyed
 code: no-auto-bytecode-browser.ts  L478
 
+
+## How to run it##
+Compile the wasm package: `cd ./lib/examples/webrtc-wasm && wasm-pack build --target web`   
+Start to host the webpage: `python3 -m http.server 8080`  
+Open `localhost:8080` in browser
+
+
+
+
