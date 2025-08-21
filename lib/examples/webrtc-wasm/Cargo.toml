@@ -1,0 +1,21 @@
+[package]
+name = "smoldot-webrtc-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+smoldot = { path = "../..", default-features = false }
+rand = { version = "0.8.5", default-features = false, features = ["alloc", "getrandom", "std_rng"] }
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["console"] }
+getrandom = { version = "0.2", features = ["js"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["console"] }
+getrandom = { version = "0.2", features = ["js"] }

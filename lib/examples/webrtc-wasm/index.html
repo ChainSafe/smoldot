@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Smoldot WebRTC WASM Demo</title>
+    <style>
+        /* body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        } */
+        #output {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            min-height: 100px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <h1>Smoldot WebRTC WASM</h1>
+    
+    <button onclick="runDemo()">Run WebRTC Demo</button>
+    
+    <div id="output"></div>
+
+    <script type="module">
+        import init, { run_webrtc_demo } from './pkg/smoldot_webrtc_wasm.js';
+
+        window.runDemo = async function() {
+            const output = document.getElementById('output');
+            output.textContent = 'Loading WASM module...\n';
+            
+            try {
+                await init();
+                output.textContent += 'WASM module loaded successfully!\n';
+                output.textContent += 'Running WebRTC demo...\n';
+                
+                const message = run_webrtc_demo();
+                output.textContent += `${message}\n`;
+            } catch (error) {
+                output.textContent += `Error: ${error}\n`;
+            }
+        };
+    </script>
+</body>
+</html>
