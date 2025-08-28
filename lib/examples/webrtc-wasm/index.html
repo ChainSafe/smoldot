@@ -39,8 +39,8 @@
             id="peerAddress"
             type="text"
             placeholder="Enter peer multiaddress"
-            value="/ip4/127.0.0.1/udp/8888/webrtc-direct/certhash/uEiAxBKSG-uYpMbBjdGqTvsXnDnXMKr_VtbrAMB5RQhlfhg/p2p/12D3KooWCkofKQ8FkwYbnjLmfVpoG1LsovuuyYMQAifTcjbyYGAK"
     >
+<!--            value="/ip4/127.0.0.1/udp/8888/webrtc-direct/certhash/uEiA7rTkiAsZxWQQw9dFtsajgiKlRBJEU0IM4QEX-MJMFqQ/p2p/12D3KooWFHKnE2F1NbRfndFnqPK5V2jDsmEcRiQY8dW8pEiF48x6"-->
     <button onclick="runDemo()">Run WebRTC Demo</button>
 
     <div id="output"></div>
@@ -71,17 +71,9 @@
             });
         };
 
-        // function eqBytes(a, b) {
-        //   if (a.length !== b.length) return false;
-        //   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-        //   return true;
-        // }
-
         export async function dialWebRtcDirect(addr, smoldotGlue /*: {
           // Provide these from your WASM/Rust side:
-          onOpen(localCertSha256: Uint8Array): void;
-          onMessage(data: Uint8Array): void;           // deliver incoming chunks into Smoldot
-          nextOutbound(): Uint8Array | null;           // get outbound chunk from Smoldot (if any)
+          onMessage(data: Uint8Array): void;
           onClose(reason?: string): void;
         }*/) {
           const certificate = await RTCPeerConnection.generateCertificate({
@@ -91,8 +83,9 @@
           });
 
           const pc = new RTCPeerConnection({ certificates: [certificate], iceServers: [] });
+          pc.ondatachannel = console.log;
           // DataChannel parameters must match webrtc-direct expectations
-          const dc = pc.createDataChannel('libp2p', {
+          const dc = pc.createDataChannel('', {
             negotiated: true,
             id: 0,
             ordered: true,
@@ -103,6 +96,7 @@
 
           const offer = await pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });
           offer.sdp = mungeOffer(offer.sdp, ufrag);
+
           await pc.setLocalDescription(offer);
 
           const ma = multiaddr(addr);
@@ -116,30 +110,21 @@
           // Notify local certificate sha256 to upper layer
           const localFpHex = formatFingerprintSha256(certificate);
           const localSha256 = hexToBytes(localFpHex);
-          smoldotGlue.onOpen(localSha256);
 
           dc.binaryType = 'arraybuffer';
-          dc.onmessage = (ev) => {
-            const data = new Uint8Array(ev.data);
-            smoldotGlue.onMessage(data);
+          dc.onmessage = (event) => {
+            const data = new Uint8Array(event.data);
+              console.log('DataChannel message received. %i bytes', data.length); // TODO remove
+              smoldotGlue.onMessage(data, localSha256);
           };
+
           dc.onclose = () => smoldotGlue.onClose('dc closed');
           dc.onerror = () => smoldotGlue.onClose('dc error');
 
-          // Simple outbound pump loop (poll-based). Replace with event-driven integration as needed.
-          const pump = () => {
-            try {
-              for (;;) {
-                const chunk = smoldotGlue.nextOutbound();
-                if (!chunk) break;
-                dc.send(chunk);
-              }
-            } finally {
-              // Schedule next tick. You can also schedule using wakeups from the ReadWrite state.
-              setTimeout(pump, 10);
-            }
+          smoldotGlue.send = (data) => {
+            console.log('JS: sending %i bytes', data.length);
+            dc.send(data);
           };
-          pump();
 
           return {
             close: () => pc.close(),

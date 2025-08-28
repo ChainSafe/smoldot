@@ -26,6 +26,10 @@ use crate::{
 use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{cmp, fmt, mem, ops};
 
+#[cfg(target_arch = "wasm32")]
+use web_sys::console;
+use alloc::format;
+
 /// State of the framing.
 pub struct WebRtcFraming {
     /// Value of [`ReadWrite::expected_incoming_bytes`] of the inner stream the last time that
@@ -91,12 +95,20 @@ impl WebRtcFraming {
     ) -> Result<InnerReadWrite<'a, TNow>, Error> {
         // Read from the incoming buffer until we have enough data for the underlying substream.
         loop {
+            #[cfg(target_arch = "wasm32")]
+            console::log_1(
+                &format!(
+                    "WebRtcFraming::read_write: self.inner_stream_expected_incoming_bytes: {:?}",
+                    self.inner_stream_expected_incoming_bytes,
+                ).into()
+            );
+
             // Immediately stop looping if there is enough data for the underlying substream.
             // Also stop looping if `inner_stream_expected_incoming_bytes` is `None`, as we always
             // want to process the inner substream the first time ever.
             if self
                 .inner_stream_expected_incoming_bytes
-                .map_or(true, |rq_bytes| rq_bytes <= self.receive_buffer.len())
+                .map_or(false, |rq_bytes| rq_bytes <= self.receive_buffer.len())
             {
                 break;
             }
@@ -148,8 +160,25 @@ impl WebRtcFraming {
 
                         // Copy the message of the remote out from the incoming buffer.
                         if let Some(message) = framed_message.message {
+                            #[cfg(target_arch = "wasm32")]
+                            console::log_1(&format!("WebRtcFraming::read_write: extracting {} bytes payload", message.len()).into());
+
                             self.receive_buffer.extend_from_slice(message);
                         }
+
+                        #[cfg(target_arch = "wasm32")]
+                        console::log_1(
+                            &format!(
+                                "WebRtcFraming::read_write: outer_read_write.incoming_buffer.len(): {}",
+                                outer_read_write.incoming_buffer.len(),
+                            ).into()
+                        );
+                        console::log_1(
+                            &format!(
+                                "WebRtcFraming::read_write: rest.len(): {}",
+                                rest.len(),
+                            ).into()
+                        );
 
                         // Number of bytes to discard is the size of the protobuf frame.
                         outer_read_write.incoming_buffer.len() - rest.len()
@@ -176,6 +205,9 @@ impl WebRtcFraming {
                     }
                 }
             };
+
+            #[cfg(target_arch = "wasm32")]
+            console::log_1(&format!("WebRtcFraming::read_write: discarding {} bytes", bytes_to_discard).into());
 
             // Discard the frame data.
             let _extract_result = outer_read_write.incoming_bytes_take(bytes_to_discard);
