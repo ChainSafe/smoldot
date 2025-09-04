@@ -29,6 +29,7 @@ pub async fn run_client(peer_address: String) -> Result<String, String> {
     let glue = js_sys::Object::new();
     let glue_rc = Rc::new(glue);
     let handshaker: Rc<RefCell<Option<WebRtcHandshaker>>> = Rc::new(RefCell::new(None));
+    let hand_shaken = Rc::new(RefCell::new(false));
 
     // onMessage(data, localCertSha256)
     {
@@ -37,7 +38,15 @@ pub async fn run_client(peer_address: String) -> Result<String, String> {
 
         let func = Closure::<dyn Fn(js_sys::Uint8Array, js_sys::Uint8Array)>::new(
             move |data_js: js_sys::Uint8Array, local_sha256: js_sys::Uint8Array| {
-                // TODO: if handshake already finished, send pings instead
+                if hand_shaken.borrow().eq(&true) {
+                    console::log_1( // TODO send pings
+                        &format!(
+                            "Hand already shaken. Got {} mystery bytes",
+                            data_js.length(),
+                        ).into()
+                    );
+                    return;
+                }
 
                 if handshaker.borrow().is_none() {
                     if local_sha256.length() != 32 {
@@ -80,6 +89,7 @@ pub async fn run_client(peer_address: String) -> Result<String, String> {
                         }
                         Ok(true) => {
                             console::log_1(&"Hand successfully shaken 🤝".into());
+                            *hand_shaken.borrow_mut() = true;
                         }
                         Ok(false) => {
                             console::log_1(&"Handshake in progress...".into());
