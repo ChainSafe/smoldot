@@ -74,6 +74,7 @@
         export async function dialWebRtcDirect(addr, smoldotGlue /*: {
           // Provide these from your WASM/Rust side:
           onMessage(data: Uint8Array): void;
+          onPing(channelId: Number, data: Uint8Array): void;
           onClose(reason?: string): void;
         }*/) {
           const certificate = await RTCPeerConnection.generateCertificate({
@@ -83,7 +84,19 @@
           });
 
           const pc = new RTCPeerConnection({ certificates: [certificate], iceServers: [] });
-          pc.ondatachannel = console.log;
+
+          const channels = {}; // channelId -> DataChannel
+          pc.ondatachannel = event => {
+            console.log(`datachannel event. channel id: ${event.channel.id}`);
+            channels[event.channel.id] = event.channel;
+
+            event.channel.onmessage = dataEvent => {
+              const data = new Uint8Array(dataEvent.data);
+              console.log(`${data.length} bytes received on channel ${event.channel.id}: ${data}`);
+              smoldotGlue.onPing(event.channel.id, data);
+            };
+          };
+
           // DataChannel parameters must match webrtc-direct expectations
           const dc = pc.createDataChannel('', {
             negotiated: true,
@@ -112,18 +125,22 @@
           const localSha256 = hexToBytes(localFpHex);
 
           dc.binaryType = 'arraybuffer';
-          dc.onmessage = (event) => {
+          dc.onmessage = event => {
             const data = new Uint8Array(event.data);
-              console.log('DataChannel message received. %i bytes', data.length); // TODO remove
-              smoldotGlue.onMessage(data, localSha256);
+            smoldotGlue.onMessage(data, localSha256);
           };
 
           dc.onclose = () => smoldotGlue.onClose('dc closed');
           dc.onerror = () => smoldotGlue.onClose('dc error');
 
-          smoldotGlue.send = (data) => {
-            console.log('JS: sending %i bytes', data.length);
+          smoldotGlue.send = data => {
+            console.log(`JS: sending ${data.length} bytes to channel ${dc.id}`);
             dc.send(data);
+          };
+
+          smoldotGlue.sendTo = (channelId, data) => {
+            console.log(`JS: sending ${data.length} bytes to channel ${channelId}`);
+            channels[channelId].send(data);
           };
 
           return {
