@@ -33,203 +33,211 @@
     </style>
 </head>
 <body>
-    <h1>Smoldot WebRTC WASM</h1>
+<h1>Smoldot WebRTC WASM</h1>
 
-    <input
-            id="peerAddress"
-            type="text"
-            placeholder="Enter peer multiaddress"
-    >
-<!--            value="/ip4/127.0.0.1/udp/8888/webrtc-direct/certhash/uEiA7rTkiAsZxWQQw9dFtsajgiKlRBJEU0IM4QEX-MJMFqQ/p2p/12D3KooWFHKnE2F1NbRfndFnqPK5V2jDsmEcRiQY8dW8pEiF48x6"-->
-    <button onclick="runDemo()">Run WebRTC Demo</button>
+<input
+        id="peerAddress"
+        type="text"
+        placeholder="Enter peer multiaddress"
+>
+<button onclick="runDemo()">Run WebRTC Demo</button>
 
-    <div id="output"></div>
+<div id="output"></div>
 
-    <script type="module">
-        import { multiaddr, CODE_IP4, CODE_UDP, CODE_CERTHASH } from 'https://esm.sh/@multiformats/multiaddr@12.5.1';
-        import { base64url } from 'https://esm.sh/multiformats@13.4.0/bases/base64';
-        import init, { run_client } from './pkg/smoldot_webrtc_wasm.js';
+<script type="module">
+  import {multiaddr, CODE_IP4, CODE_UDP, CODE_CERTHASH} from 'https://esm.sh/@multiformats/multiaddr@12.5.1';
+  import {base64url} from 'https://esm.sh/multiformats@13.4.0/bases/base64';
+  import init, {run_client} from './pkg/smoldot_webrtc_wasm.js';
 
-        const maxMessageSize = 16384;
+  const maxMessageSize = 16384;
 
-        window.runDemo = async function() {
-            const output = document.getElementById('output');
-            output.textContent = 'Loading WASM module...\n';
+  window.runDemo = async function () {
+    const output = document.getElementById('output');
+    output.textContent = 'Loading WASM module...\n';
 
-            try {
-                await init();
-                output.textContent += 'WASM module loaded successfully!\n';
-            } catch (error) {
-                output.textContent += `Error: ${error}\n`;
-            }
+    try {
+      await init();
+      output.textContent += 'WASM module loaded successfully!\n';
+    } catch (error) {
+      output.textContent += `Error: ${error}\n`;
+    }
 
-            output.textContent += 'Running WebRTC demo...\n';
-            const peer = document.getElementById('peerAddress').value;
+    output.textContent += 'Running WebRTC demo...\n';
+    const peer = document.getElementById('peerAddress').value;
 
-            await run_client(peer).catch(error => {
-                output.textContent += `\n\n${error}\n`;
-            });
-        };
+    await run_client(peer, sendTo).catch(error => {
+      output.textContent += `\n\n${error}\n`;
+    });
+  };
 
-        export async function dialWebRtcDirect(addr, smoldotGlue /*: {
-          // Provide these from your WASM/Rust side:
-          onMessage(data: Uint8Array): void;
-          onPing(channelId: Number, data: Uint8Array): void;
-          onClose(reason?: string): void;
-        }*/) {
-          const certificate = await RTCPeerConnection.generateCertificate({
-            name: 'ECDSA',
-            hash: 'SHA-256',
-            namedCurve: 'P-256',
-          });
+  const channels = {}; // channelId -> DataChannel
 
-          const pc = new RTCPeerConnection({ certificates: [certificate], iceServers: [] });
+  export function sendTo(channelId, data) {
+    const channel = channels[channelId];
 
-          const channels = {}; // channelId -> DataChannel
-          pc.ondatachannel = event => {
-            console.log(`datachannel event. channel id: ${event.channel.id}`);
-            channels[event.channel.id] = event.channel;
+    if (!channel) {
+      console.error(`JS: channel ${channelId} not found`);
+      return;
+    }
 
-            event.channel.onmessage = dataEvent => {
-              const data = new Uint8Array(dataEvent.data);
-              console.log(`${data.length} bytes received on channel ${event.channel.id}: ${data}`);
-              smoldotGlue.onPing(event.channel.id, data);
-            };
-          };
+    if (channel.readyState !== 'open') {
+      console.error(`JS: channel ${channelId} is not in ready state`);
+      return;
+    }
 
-          // DataChannel parameters must match webrtc-direct expectations
-          const dc = pc.createDataChannel('', {
-            negotiated: true,
-            id: 0,
-            ordered: true,
-          });
+    channel.send(data);
+  }
 
-          // Build answer and offer with patched ICE ufrag/pwd with libp2p tag
-          const ufrag = `libp2p+webrtc+v1/${randomString()}`;
+  export async function generateCertificate() {
+    return await RTCPeerConnection.generateCertificate({
+      name: 'ECDSA',
+      hash: 'SHA-256',
+      namedCurve: 'P-256',
+    });
+  }
 
-          const offer = await pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });
-          offer.sdp = mungeOffer(offer.sdp, ufrag);
+  globalThis.generateCertificate = generateCertificate;
 
-          await pc.setLocalDescription(offer);
+  export function getCertificateFingerprint(certificate) {
+    const fp = certificate.getFingerprints().find(f => f.algorithm.toUpperCase() === 'SHA-256');
+    if (!fp) throw new Error('No SHA-256 fingerprint on certificate');
 
-          const ma = multiaddr(addr);
-          const componentsByCode = {};
-          ma.getComponents().forEach(c => componentsByCode[c.code] = c.value);
+    const clean = fp.value.replace(/:/g, '');
+    const out = new Uint8Array(clean.length / 2);
 
-          const { [CODE_IP4]: ip, [CODE_UDP]: port, [CODE_CERTHASH]: certhash } = componentsByCode;
-          const answer = buildAnswer(ip, port, certhash, ufrag);
-          await pc.setRemoteDescription(answer);
+    for (let i = 0; i < out.length; i++) {
+      out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+    }
 
-          // Notify local certificate sha256 to upper layer
-          const localFpHex = formatFingerprintSha256(certificate);
-          const localSha256 = hexToBytes(localFpHex);
+    return out;
+  }
 
-          dc.binaryType = 'arraybuffer';
-          dc.onmessage = event => {
-            const data = new Uint8Array(event.data);
-            smoldotGlue.onMessage(data, localSha256);
-          };
+  globalThis.getCertificateFingerprint = getCertificateFingerprint;
 
-          dc.onclose = () => smoldotGlue.onClose('dc closed');
-          dc.onerror = () => smoldotGlue.onClose('dc error');
+  // glue should have the following method(s):
+  // onMessage(channelId: Number, data: Uint8Array): void;
+  export async function dialWebRtcDirect(address, certificate, glue) {
+    const pc = new RTCPeerConnection({certificates: [certificate], iceServers: []});
 
-          smoldotGlue.send = data => {
-            console.log(`JS: sending ${data.length} bytes to channel ${dc.id}`);
-            dc.send(data);
-          };
+    pc.ondatachannel = event => {
+      console.log(`JS: datachannel event. channel id: ${event.channel.id}`);
+      channels[event.channel.id] = event.channel;
 
-          smoldotGlue.sendTo = (channelId, data) => {
-            console.log(`JS: sending ${data.length} bytes to channel ${channelId}`);
-            channels[channelId].send(data);
-          };
+      event.channel.onmessage = dataEvent => {
+        const data = new Uint8Array(dataEvent.data);
+        console.log(`JS: ${data.length} bytes received on channel ${event.channel.id}`);
+        glue.onMessage(event.channel.id, data);
+      };
+    };
 
-          return {
-            close: () => pc.close(),
-          };
-        }
+    // Build answer and offer with patched ICE ufrag/pwd with libp2p tag
+    const ufrag = `libp2p+webrtc+v1/${randomString()}`;
 
-        globalThis.dialWebRtcDirect = dialWebRtcDirect;
+    const offer = await pc.createOffer({offerToReceiveAudio: false, offerToReceiveVideo: false});
+    offer.sdp = mungeOffer(offer.sdp, ufrag);
 
-        function buildAnswer(ip, port, certhash, ufrag) {
-          // Single host candidate, ICE-lite, DTLS passive, SCTP port 5000, max message size 16KiB.
-          const sdp = [
-            'v=0',
-            'o=- 0 0 IN IP4 127.0.0.1',
-            's=-',
-            't=0 0',
-            'a=ice-lite',
-            `a=fingerprint:sha-256 ${certhashToSdpFingerprint(certhash)}`,
-            `a=ice-ufrag:${ufrag}`,
-            `a=ice-pwd:${ufrag}`,
-            'a=setup:passive',
-            'm=application 9 UDP/DTLS/SCTP webrtc-datachannel',
-            `c=IN IP4 ${ip}`,
-            'a=mid:0',
-            `a=candidate:1 1 UDP 2130706431 ${ip} ${port} typ host`,
-            'a=end-of-candidates',
-            'a=sctp-port:5000',
-            `a=max-message-size:${maxMessageSize}`,
-          ].join('\r\n') + '\r\n';
+    console.log('JS: offer');
+    console.log(offer.sdp);
 
-          return {
-            type: 'answer',
-              sdp: sdp,
-          }
-        }
+    await pc.setLocalDescription(offer);
 
-        function mungeOffer(sdp, ufrag) {
-            return sdp
-                .replace(/a=ice-ufrag:.+\r\n/, `a=ice-ufrag:${ufrag}\r\n`)
-                .replace(/a=ice-pwd:.+\r\n/, `a=ice-pwd:${ufrag}\r\n`)
-                .replace(/a=max-message-size:.+\r\n/, `a=max-message-size:${maxMessageSize}\r\n`);
-        }
+    const ma = multiaddr(address);
+    const componentsByCode = {};
+    ma.getComponents().forEach(c => componentsByCode[c.code] = c.value);
 
-        function certhashToSdpFingerprint(certhash) {
-          // certhash is multibase; 'u' means base64url (no padding)
-          if (!certhash || certhash[0] !== 'u') {
-            throw new Error('Expected base64url multibase certhash starting with "u"');
-          }
+    const {[CODE_IP4]: ip, [CODE_UDP]: port, [CODE_CERTHASH]: certhash} = componentsByCode;
+    console.log(`JS: connecting to ${ip}:${port} with certhash ${certhash}`);
+    const answer = buildAnswer(ip, port, certhash, ufrag);
 
-          const mh = base64url.decode(certhash);
-          // Multihash: 0x12 = sha2-256, 0x20 = 32 bytes
-          if (mh.length !== 34 || mh[0] !== 0x12 || mh[1] !== 0x20) {
-            throw new Error('Unsupported certhash multihash; expected sha2-256/32');
-          }
+    console.log('JS: answer');
+    console.log(answer.sdp);
 
-          const digest = mh.slice(2); // 32-byte SHA-256
-          return Array.from(digest)
-            .map(b => b.toString(16).padStart(2, '0'))
-            .join(':')
-            .toUpperCase();
-        }
+    await pc.setRemoteDescription(answer);
 
-        function formatFingerprintSha256(cert) {
-          // Returns colon-separated uppercase hex of the certificate fingerprint
-          const fp = cert.getFingerprints().find(f => f.algorithm.toUpperCase() === 'SHA-256');
-          if (!fp) throw new Error('No SHA-256 fingerprint on certificate');
-          return fp.value.toUpperCase();
-        }
+    console.log('JS: creating datachannel');
 
-        function hexToBytes(hex) {
-          const clean = hex.replace(/:/g, '').toLowerCase();
-          const out = new Uint8Array(clean.length / 2);
+    const dc = pc.createDataChannel('', {
+      negotiated: true,
+      id: 0,
+      ordered: true,
+    });
 
-          for (let i = 0; i < out.length; i++) {
-            out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-          }
+    dc.binaryType = 'arraybuffer';
+    dc.onmessage = event => {
+      const data = new Uint8Array(event.data);
+      glue.onMessage(event.channel.id, data);
+    };
 
-          return out;
-        }
+    dc.onclose = () => console.log('JS: channel 0 closed');
+    dc.onerror = err => console.error(`JS: channel 0 error: ${err.message}`);
+  }
 
-        function randomString(len = 5) {
-            const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-            const arr = new Uint8Array(len);
-            crypto.getRandomValues(arr);
-            let s = '';
-            for (let i = 0; i < len; i++) s += chars[arr[i] % chars.length];
-            return s;
-        }
+  globalThis.dialWebRtcDirect = dialWebRtcDirect;
 
-    </script>
+  function buildAnswer(ip, port, certhash, ufrag) {
+    // Single host candidate, ICE-lite, DTLS passive, SCTP port 5000, max message size 16KiB.
+    const sdp = [
+      'v=0',
+      'o=- 0 0 IN IP4 127.0.0.1',
+      's=-',
+      't=0 0',
+      'a=ice-lite',
+      `a=fingerprint:sha-256 ${certhashToSdpFingerprint(certhash)}`,
+      `a=ice-ufrag:${ufrag}`,
+      `a=ice-pwd:${ufrag}`,
+      'a=setup:passive',
+      'm=application 9 UDP/DTLS/SCTP webrtc-datachannel',
+      `c=IN IP4 ${ip}`,
+      'a=mid:0',
+      `a=candidate:1 1 UDP 2130706431 ${ip} ${port} typ host`,
+      'a=end-of-candidates',
+      'a=sctp-port:5000',
+      `a=max-message-size:${maxMessageSize}`,
+    ].join('\r\n') + '\r\n';
+
+    return {
+      type: 'answer',
+      sdp: sdp,
+    }
+  }
+
+  function mungeOffer(sdp, ufrag) {
+    let munged = sdp
+      .replace(/a=ice-ufrag:.+\r\n/, `a=ice-ufrag:${ufrag}\r\n`)
+      .replace(/a=ice-pwd:.+\r\n/, `a=ice-pwd:${ufrag}\r\n`)
+      .replace(/a=max-message-size:.+\r\n/, `a=max-message-size:${maxMessageSize}\r\n`);
+
+    return `${munged}m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=mid:0\r\n`;
+  }
+
+  function certhashToSdpFingerprint(certhash) {
+    // certhash is multibase; 'u' means base64url (no padding)
+    if (!certhash || certhash[0] !== 'u') {
+      throw new Error('Expected base64url multibase certhash starting with "u"');
+    }
+
+    const mh = base64url.decode(certhash);
+    // Multihash: 0x12 = sha2-256, 0x20 = 32 bytes
+    if (mh.length !== 34 || mh[0] !== 0x12 || mh[1] !== 0x20) {
+      throw new Error('Unsupported certhash multihash; expected sha2-256/32');
+    }
+
+    const digest = mh.slice(2); // 32-byte SHA-256
+    return Array.from(digest)
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join(':')
+      .toUpperCase();
+  }
+
+  function randomString(len = 5) {
+    const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const arr = new Uint8Array(len);
+    crypto.getRandomValues(arr);
+    let s = '';
+    for (let i = 0; i < len; i++) s += chars[arr[i] % chars.length];
+    return s;
+  }
+
+</script>
 </body>
 </html>
