@@ -130,14 +130,27 @@
       };
     };
 
+    const dc = pc.createDataChannel('', {
+      negotiated: true,
+      id: 0,
+      ordered: true,
+    });
+
+    channels[dc.id] = dc;
+    dc.binaryType = 'arraybuffer';
+    dc.onmessage = event => {
+      const data = new Uint8Array(event.data);
+      glue.onMessage(dc.id, data);
+    };
+
+    dc.onclose = () => console.log('JS: channel 0 closed');
+    dc.onerror = err => console.error(`JS: channel 0 error: ${err.message}`);
+
     // Build answer and offer with patched ICE ufrag/pwd with libp2p tag
     const ufrag = `libp2p+webrtc+v1/${randomString()}`;
 
     const offer = await pc.createOffer({offerToReceiveAudio: false, offerToReceiveVideo: false});
     offer.sdp = mungeOffer(offer.sdp, ufrag);
-
-    console.log('JS: offer');
-    console.log(offer.sdp);
 
     await pc.setLocalDescription(offer);
 
@@ -146,30 +159,9 @@
     ma.getComponents().forEach(c => componentsByCode[c.code] = c.value);
 
     const {[CODE_IP4]: ip, [CODE_UDP]: port, [CODE_CERTHASH]: certhash} = componentsByCode;
-    console.log(`JS: connecting to ${ip}:${port} with certhash ${certhash}`);
     const answer = buildAnswer(ip, port, certhash, ufrag);
 
-    console.log('JS: answer');
-    console.log(answer.sdp);
-
     await pc.setRemoteDescription(answer);
-
-    console.log('JS: creating datachannel');
-
-    const dc = pc.createDataChannel('', {
-      negotiated: true,
-      id: 0,
-      ordered: true,
-    });
-
-    dc.binaryType = 'arraybuffer';
-    dc.onmessage = event => {
-      const data = new Uint8Array(event.data);
-      glue.onMessage(event.channel.id, data);
-    };
-
-    dc.onclose = () => console.log('JS: channel 0 closed');
-    dc.onerror = err => console.error(`JS: channel 0 error: ${err.message}`);
   }
 
   globalThis.dialWebRtcDirect = dialWebRtcDirect;
@@ -202,12 +194,10 @@
   }
 
   function mungeOffer(sdp, ufrag) {
-    let munged = sdp
+    return sdp
       .replace(/a=ice-ufrag:.+\r\n/, `a=ice-ufrag:${ufrag}\r\n`)
       .replace(/a=ice-pwd:.+\r\n/, `a=ice-pwd:${ufrag}\r\n`)
       .replace(/a=max-message-size:.+\r\n/, `a=max-message-size:${maxMessageSize}\r\n`);
-
-    return `${munged}m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=mid:0\r\n`;
   }
 
   function certhashToSdpFingerprint(certhash) {

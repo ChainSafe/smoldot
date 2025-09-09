@@ -1,17 +1,18 @@
+use rand::{RngCore, SeedableRng, rngs::StdRng};
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::thread::sleep;
-use std::time::Duration;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 use smoldot::libp2p::{
+    PeerId,
     connection::{noise, webrtc_framing},
     read_write::ReadWrite,
-    PeerId,
 };
 
 use wasm_bindgen::prelude::*;
-use web_sys::console;
+use wasm_bindgen_futures::{JsFuture, spawn_local};
+use web_sys::{console, window};
 
 #[wasm_bindgen]
 extern "C" {
@@ -32,393 +33,110 @@ extern "C" {
 pub async fn run_client(peer_address: String, send_fn: js_sys::Function) -> Result<String, String> {
     console::log_1(&format!("dialing: {}", peer_address).into());
 
-    let mut client = Client::new(
-        peer_address,
-        send_fn,
-    ).await
+    let mut client = Client::new(peer_address, send_fn)
+        .await
         .map_err(|e| format!("client error: {:?}", e))?;
 
-    client.run().await.map_err(|e| format!("client run() error: {:?}", e))?;
+    client
+        .run()
+        .await
+        .map_err(|e| format!("client run() error: {:?}", e))?;
 
     Ok("doin' the ting...".to_owned())
 }
 
-// pub async fn delete_me(peer_address: String) -> Result<String, String> {
-//     // Parse remote certhash (32-byte SHA-256) from the multiaddr.
-//     let remote_cert_sha256 = parse_remote_cert_sha256_from_multiaddr(&peer_address)
-//         .map_err(|e| format!("Bad certhash in multiaddr: {e}"))?;
-//
-//     let glue = js_sys::Object::new();
-//     let glue_rc = Rc::new(glue);
-//     let handshaker: Rc<RefCell<Option<WebRtcHandshaker>>> = Rc::new(RefCell::new(None));
-//     let hand_shaken = Rc::new(RefCell::new(false));
-//
-//     // I'm not sure whether ReadWrite is supposed to be used as a long-lived object or a new one
-//     // should be created for each invocation of WebRtcFraming::read_write().
-//     // I went with the former to cover the case that the remote only sends a partial message that
-//     // needs to be retained across multiple calls to onMessage().
-//     let rw_rc = Rc::new(RefCell::new(ReadWrite {
-//         now: 0u64, // this is for WASM compatibility
-//         incoming_buffer: Vec::new(),
-//         expected_incoming_bytes: None,
-//         read_bytes: 0,
-//         write_buffers: Vec::new(),
-//         write_bytes_queued: 0,
-//         write_bytes_queueable: Some(128 * 1024),
-//         wake_up_after: None,
-//     }));
-//
-//     // onMessage(data, localCertSha256)
-//     {
-//         let outbound_glue = Rc::clone(&glue_rc);
-//         let handshaker = Rc::clone(&handshaker);
-//         let rw_rc = Rc::clone(&rw_rc);
-//
-//         let func = Closure::<dyn Fn(js_sys::Uint8Array, js_sys::Uint8Array)>::new(
-//             move |data_js: js_sys::Uint8Array, local_sha256: js_sys::Uint8Array| {
-//                 let mut rw = rw_rc.borrow_mut();
-//                 rw.incoming_buffer.append(&mut data_js.to_vec());
-//
-//                 // TODO after the handshake, the remote sends a FIN flag and we are supposed to
-//                 // answer with a FIN_ACK flag. I had this working before but now it's not. :(
-//                 // InnerReadWrite::drop() should figure this out and put the FIN_ACK message into
-//                 // rw.write_buffers.
-//                 if hand_shaken.borrow().eq(&true) {
-//                     let mut framing = webrtc_framing::WebRtcFraming::new();
-//
-//                     // The purpose of this scope is to drop the InnerReadWrite returned by
-//                     // framing.read_write(). For some reason, a lot of stuff happens inside
-//                     // InnerReadWrite::drop().
-//                     {
-//                         if let Err(e) = framing.read_write(&mut rw) {
-//                             console::log_1(&format!("Framing error: {e:?}").into());
-//                             return;
-//                         }
-//                     }
-//
-//                     if rw.write_buffers.is_empty() {
-//                         return;
-//                     }
-//
-//                     let outbound_glue = Rc::clone(&outbound_glue);
-//
-//                     // Prepare a JS send(...) function from glue
-//                     let send_fn = js_sys::Reflect::get(
-//                         outbound_glue.as_ref(),
-//                         &JsValue::from_str("send"),
-//                     )
-//                     .expect("glue.send must exist");
-//
-//                     let send_fn = send_fn
-//                         .dyn_into::<js_sys::Function>()
-//                         .expect("send must be function");
-//
-//                     let send = move |chunk: &[u8]| {
-//                         let arr = js_sys::Uint8Array::from(chunk);
-//                         let _ = send_fn.call1(&JsValue::UNDEFINED, &arr.into());
-//                     };
-//
-//                     for buf in rw.write_buffers.drain(..) {
-//                         if !buf.is_empty() {
-//                             send(&buf);
-//                         }
-//                     }
-//                     return;
-//                 }
-//
-//                 if handshaker.borrow().is_none() {
-//                     if local_sha256.length() != 32 {
-//                         console::log_1(&"onMessage: expected 32-byte SHA-256".into());
-//                         return;
-//                     }
-//
-//                     let mut local_cert_sha256 = [0u8; 32];
-//                     local_sha256.copy_to(&mut local_cert_sha256);
-//
-//                     *handshaker.borrow_mut() = Some(WebRtcHandshaker::new_with_random_keys(
-//                         local_cert_sha256,
-//                         remote_cert_sha256,
-//                     ));
-//                 }
-//
-//                 let res = handshaker
-//                     .borrow_mut()
-//                     .as_mut()
-//                     .unwrap()
-//                     .drive_once(&mut rw);
-//
-//                 match res {
-//                     Err(e) => {
-//                         console::log_1(&format!("Handshake error: {e:?}").into());
-//                     }
-//                     Ok(true) => {
-//                         console::log_1(&"Outer hand successfully shaken 🤝".into());
-//                         *hand_shaken.borrow_mut() = true;
-//                     }
-//                     Ok(false) => {
-//                         console::log_1(&"Handshake in progress...".into());
-//                         let wake_up_now = rw.wake_up_after.is_some_and(|wua| wua <= rw.now);
-//                         if rw.write_buffers.is_empty() && wake_up_now {
-//                             match handshaker.borrow_mut().as_mut().unwrap().drive_once(&mut rw) {
-//                                 Ok(true) => {
-//                                     console::log_1(&"Inner hand successfully shaken 🤝".into());
-//                                     *hand_shaken.borrow_mut() = true;
-//                                 },
-//                                 Ok(false) => {
-//                                     // 🤷‍♂️
-//                                 },
-//                                 Err(e) => {
-//                                     console::log_1(&format!("Handshake error: {e:?}").into());
-//                                     return;
-//                                 },
-//                             }
-//                         }
-//
-//                         if rw.write_buffers.is_empty() {
-//                             console::log_1(&"still nothing to send, nothing more to read. waiting for more data...".into());
-//                             return;
-//                         }
-//
-//                         let outbound_glue = Rc::clone(&outbound_glue);
-//
-//                         // Prepare a JS send(...) function from glue
-//                         let send_fn = js_sys::Reflect::get(
-//                             outbound_glue.as_ref(),
-//                             &JsValue::from_str("send"),
-//                         )
-//                             .expect("glue.send must exist");
-//
-//                         let send_fn = send_fn
-//                             .dyn_into::<js_sys::Function>()
-//                             .expect("send must be function");
-//
-//                         let send = move |chunk: &[u8]| {
-//                             let arr = js_sys::Uint8Array::from(chunk);
-//                             let _ = send_fn.call1(&JsValue::UNDEFINED, &arr.into());
-//                         };
-//
-//                         for buf in rw.write_buffers.drain(..) {
-//                             if !buf.is_empty() {
-//                                 send(&buf);
-//                             }
-//                         }
-//                     }
-//                 }
-//             },
-//         );
-//         js_sys::Reflect::set(
-//             glue_rc.as_ref(),
-//             &JsValue::from_str("onMessage"),
-//             func.as_ref().unchecked_ref(),
-//         )
-//         .unwrap();
-//         func.forget();
-//     }
-//
-//     // onPing(channelId, data)
-//     {
-//         let outbound_glue = Rc::clone(&glue_rc);
-//
-//         let func = Closure::<dyn Fn(js_sys::Number, js_sys::Uint8Array)>::new(
-//             move |channel_id: js_sys::Number, data_js: js_sys::Uint8Array| {
-//                 let channel_id = channel_id.as_f64().unwrap() as u64;
-//
-//                 console::log_1(&format!("onPing() channel_id: {:?}", channel_id).into());
-//
-//                 let mut rw = ReadWrite {
-//                     now: 0u64, // this is for WASM compatibility
-//                     incoming_buffer: data_js.to_vec(),
-//                     expected_incoming_bytes: None,
-//                     read_bytes: 0,
-//                     write_buffers: Vec::new(),
-//                     write_bytes_queued: 0,
-//                     write_bytes_queueable: Some(128 * 1024),
-//                     wake_up_after: None,
-//                 };
-//
-//                 let mut framing = webrtc_framing::WebRtcFraming::new();
-//                 let received_bytes;
-//
-//                 // The purpose of this scope is to drop the InnerReadWrite returned by
-//                 // framing.read_write(). For some reason, a lot of stuff happens inside
-//                 // InnerReadWrite::drop().
-//                 {
-//                     match framing.read_write(&mut rw) {
-//                         Ok(inner) => received_bytes = inner.incoming_buffer.clone(),
-//                         Err(e) => {
-//                             console::log_1(&format!("Framing error: {e:?}").into());
-//                             return;
-//                         }
-//                     };
-//                 }
-//
-//                 let outbound_glue = Rc::clone(&outbound_glue);
-//
-//                 // Prepare a JS sendTo(channelId, data) function from glue
-//                 let send_to_fn = js_sys::Reflect::get(
-//                     outbound_glue.as_ref(),
-//                     &JsValue::from_str("sendTo"),
-//                 )
-//                 .expect("glue.sendTo must exist");
-//
-//                 let send_to_fn = send_to_fn
-//                     .dyn_into::<js_sys::Function>()
-//                     .expect("sendTo must be function");
-//
-//                 let send_to = move |channel_id: u64, chunk: &[u8]| {
-//                     let arr = js_sys::Uint8Array::from(chunk);
-//                     let _ = send_to_fn.call2(&JsValue::UNDEFINED, &JsValue::from(channel_id), &arr.into());
-//                 };
-//
-//                 if rw.write_buffers.is_empty() && !received_bytes.is_empty() {
-//                     send_to(channel_id, &received_bytes); // TODO this probably needs to be wrapped in the protobuf framing
-//                 } else {
-//                     for buf in rw.write_buffers.drain(..) {
-//                         if !buf.is_empty() {
-//                             send_to(channel_id, &buf);
-//                         }
-//                     }
-//                 }
-//             }
-//         );
-//         js_sys::Reflect::set(
-//             glue_rc.as_ref(),
-//             &JsValue::from_str("onPing"),
-//             func.as_ref().unchecked_ref(),
-//         )
-//         .unwrap();
-//         func.forget();
-//     }
-//
-//     // onClose(reason?)
-//     {
-//         let func = Closure::<dyn Fn(JsValue)>::new(move |reason| {
-//             console::log_1(&format!("Closed: {:?}", reason).into());
-//         });
-//         js_sys::Reflect::set(
-//             glue_rc.as_ref(),
-//             &JsValue::from_str("onClose"),
-//             func.as_ref().unchecked_ref(),
-//         )
-//         .unwrap();
-//         func.forget();
-//     }
-//
-//     dialWebRtcDirect(peer_address, glue_rc.as_ref().clone().into())
-//         .await
-//         .map_err(|e| format!("Dial error: {:?}", e))?;
-//
-//     Ok("WebRTC-direct dialing started".to_owned())
-// }
-
 struct Client {
-    peer_address: String,
-    send_fn: js_sys::Function,
-    local_cert: JsValue,
-    local_cert_sha256: [u8; 32],
-    remote_cert_sha256: [u8; 32],
-    handshaker: WebRtcHandshaker,
-    hand_shaken: bool,
-    msg_q: Arc<Mutex<VecDeque<(u64, Vec<u8>)>>>,
-    streams: HashMap<u64, ReadWrite<u64>>, //HashMap<u64, Rc<RefCell<ReadWrite<u64>>>>,
+    inner: Rc<RefCell<ClientInner>>,
 }
 
 impl Client {
-    async fn new(
-        peer_address: String,
-        send_fn: js_sys::Function,
-    ) -> Result<Self, String> {
+    async fn new(peer_address: String, send_fn: js_sys::Function) -> Result<Self, String> {
         let local_cert = generateCertificate().await;
 
-        let cert_fp = getCertificateFingerprint(local_cert.clone())
-            .map_err(|e| format!("{:?}", e))?;
+        let cert_fp =
+            getCertificateFingerprint(local_cert.clone()).map_err(|e| format!("{:?}", e))?;
 
         let mut local_cert_sha256 = [0u8; 32];
         cert_fp.copy_to(&mut local_cert_sha256);
 
         let remote_cert_sha256 = parse_remote_cert_sha256_from_multiaddr(&peer_address)
-            .map_err(|e| format!("Bad certhash in multiaddr: {e}"))?;
+            .map_err(|e| format!("bad certhash in multiaddr: {e}"))?;
 
-        let handshaker = WebRtcHandshaker::new_with_random_keys(
-            local_cert_sha256,
-            remote_cert_sha256,
-        );
+        let handshaker =
+            WebRtcHandshaker::new_with_random_keys(local_cert_sha256, remote_cert_sha256);
 
         Ok(Self {
-            peer_address,
-            send_fn,
-            local_cert,
-            local_cert_sha256,
-            remote_cert_sha256,
-            handshaker,
-            hand_shaken: false,
-            msg_q: Arc::new(Mutex::new(VecDeque::new())),
-            streams: HashMap::new(),
+            inner: Rc::new(RefCell::new(ClientInner {
+                peer_address,
+                send_fn,
+                local_cert,
+                handshaker,
+                hand_shaken: false,
+                streams: HashMap::new(),
+            })),
         })
     }
 
     async fn run(&mut self) -> Result<(), String> {
         let glue = js_sys::Object::new();
-        let msg_q = self.msg_q.clone();
+        let inner_rc = Rc::clone(&self.inner);
 
         let func = Closure::<dyn FnMut(js_sys::Number, js_sys::Uint8Array)>::new(
             move |channel_id: js_sys::Number, data: js_sys::Uint8Array| {
                 let channel_id = channel_id.as_f64().unwrap() as u64;
-                msg_q.lock().unwrap().push_back((channel_id, data.to_vec()));
-            });
+                let data = data.to_vec();
+                let mut this = inner_rc.borrow_mut();
+
+                if channel_id == 0 {
+                    this.drive_handshake(channel_id, &data);
+                } else {
+                    this.drive_substream(channel_id, &data);
+                }
+            },
+        );
 
         js_sys::Reflect::set(
             glue.as_ref(),
             &JsValue::from_str("onMessage"),
             func.as_ref().unchecked_ref(),
         )
-            .unwrap();
+        .unwrap();
         func.forget();
 
-        dialWebRtcDirect(self.peer_address.clone(), self.local_cert.clone(), glue)
+        let (peer_address, local_cert) = {
+            let this = self.inner.borrow();
+            (this.peer_address.clone(), this.local_cert.clone())
+        };
+
+        dialWebRtcDirect(peer_address, local_cert, glue)
             .await
-            .map_err(|e| format!("Dial error: {:?}", e))?;
+            .map_err(|e| format!("dial error: {:?}", e))?;
 
-        console::log_1(&"back in Rust from dialWebRtcDirect(): {}".into());
-
-        let msg_q = self.msg_q.clone();
-
-        loop {
-            let mut msg_q = msg_q.lock().unwrap();
-
-            if let Some((channel_id, data)) = msg_q.pop_front() {
-                if channel_id == 0 {
-                    self.drive_handshake(channel_id, data);
-                } else {
-                    self.on_message(channel_id, data);
-                }
-            } else {
-                sleep(Duration::from_millis(100));
-            }
-        }
+        Ok(())
     }
+}
 
-    fn drive_handshake(&mut self, channel_id: u64, data: Vec<u8>) {
+struct ClientInner {
+    peer_address: String,
+    send_fn: js_sys::Function,
+    local_cert: JsValue,
+    handshaker: WebRtcHandshaker,
+    hand_shaken: bool,
+    streams: HashMap<u64, ReadWrite<u64>>,
+}
+
+impl ClientInner {
+    fn drive_handshake(&mut self, channel_id: u64, data: &[u8]) {
         if self.hand_shaken {
             // TODO check FIN flag and respond with FIN_ACK using WebRtcFraming::read_write()
             console::log_1(&"handshake already done".into());
             return;
         }
 
-        let mut rw = self.streams.entry(channel_id).or_insert_with(|| {
-            /*Rc::new(RefCell::new(*/ReadWrite {
-                now: 0u64, // this is for WASM compatibility
-                incoming_buffer: Vec::new(),
-                expected_incoming_bytes: None,
-                read_bytes: 0,
-                write_buffers: Vec::new(),
-                write_bytes_queued: 0,
-                write_bytes_queueable: Some(128 * 1024),
-                wake_up_after: None,
-            }//))
-        });
+        let mut rw = self.streams.entry(channel_id).or_insert_with(empty_read_write);
+        rw.incoming_buffer.extend_from_slice(data);
 
-        match self.handshaker.drive_once(&mut rw) {
+        match self.handshaker.drive_once(rw) {
             Err(e) => {
                 console::log_1(&format!("handshake error: {e:?}").into());
             }
@@ -434,19 +152,22 @@ impl Client {
                         Ok(true) => {
                             console::log_1(&"inner hand successfully shaken 🤝".into());
                             self.hand_shaken = true;
-                        },
+                        }
                         Ok(false) => {
                             // 🤷‍♂️
-                        },
+                        }
                         Err(e) => {
                             console::log_1(&format!("handshake error: {e:?}").into());
                             return;
-                        },
+                        }
                     }
                 }
 
                 if rw.write_buffers.is_empty() {
-                    console::log_1(&"still nothing to send, nothing more to read. waiting for more data...".into());
+                    console::log_1(
+                        &"still nothing to send, nothing more to read. waiting for more data..."
+                            .into(),
+                    );
                     return;
                 }
 
@@ -455,31 +176,26 @@ impl Client {
                 }
             }
         }
-
     }
 
-    fn on_message(&mut self, channel_id: u64, data: Vec<u8>) {
-        let mut rw = self.streams.entry(channel_id).or_insert_with(|| {
-            /*Rc::new(RefCell::new(*/ReadWrite {
-                now: 0u64, // this is for WASM compatibility
-                incoming_buffer: Vec::new(),
-                expected_incoming_bytes: None,
-                read_bytes: 0,
-                write_buffers: Vec::new(),
-                write_bytes_queued: 0,
-                write_bytes_queueable: Some(128 * 1024),
-                wake_up_after: None,
-            }//))
-        });
+    fn drive_substream(&mut self, channel_id: u64, data: &[u8]) {
+        if !self.hand_shaken {
+            console::log_1(
+                &format!(
+                    "got message on channel {channel_id} before completing handshake. ignoring"
+                )
+                    .into(),
+            );
+        }
+
+        let rw = self.streams.entry(channel_id).or_insert_with(empty_read_write);
+        rw.incoming_buffer.extend_from_slice(data);
 
         let mut framing = webrtc_framing::WebRtcFraming::new();
-        // let mut rw = rw.borrow_mut();
-        rw.incoming_buffer.copy_from_slice(&*data);
 
-        match framing.read_write(&mut rw) {
+        match framing.read_write(rw) {
             Err(e) => {
                 console::log_1(&format!("Framing error: {e:?}").into());
-                return;
             }
             Ok(mut inner) => {
                 for chunk in inner.write_buffers.drain(..) {
@@ -487,26 +203,38 @@ impl Client {
                 }
             }
         }
-
-        // TODO create send_all() because DRY
-        // The ReadWriteInner returned by framing.read_write() above needs to have been dropped
-        // before the code below is executed. This is because the InnerReadWrite::drop() method
-        // might add data to rw.write_buffers.
-        for chunk in rw.write_buffers.drain(..) {
-            send(channel_id, &chunk, self.send_fn.clone());
-        }
     }
 }
 
 fn send(channel_id: u64, data: &[u8], send_fn: js_sys::Function) {
     let arr = js_sys::Uint8Array::from(data);
 
-    if let Err(e) = send_fn.call2(
-        &JsValue::UNDEFINED,
-        &JsValue::from(channel_id),
-        &arr.into(),
-    ) {
+    if let Err(e) = send_fn.call2(&JsValue::UNDEFINED, &JsValue::from(channel_id), &arr.into()) {
         console::log_1(&format!("sending to data channel {channel_id} failed: {e:?}").into());
+    }
+}
+
+pub async fn async_sleep(millis: i32) {
+    let window = window().expect("should have a window");
+    let promise = JsFuture::from(js_sys::Promise::new(&mut |resolve, _reject| {
+        window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis)
+            .unwrap();
+    }));
+
+    promise.await.unwrap();
+}
+
+fn empty_read_write() -> ReadWrite<u64> {
+    ReadWrite {
+        now: 0u64, // this is for WASM compatibility
+        incoming_buffer: Vec::new(),
+        expected_incoming_bytes: None,
+        read_bytes: 0,
+        write_buffers: Vec::new(),
+        write_bytes_queued: 0,
+        write_bytes_queueable: Some(128 * 1024),
+        wake_up_after: None,
     }
 }
 
@@ -703,8 +431,8 @@ fn parse_remote_cert_sha256_from_multiaddr(addr: &str) -> Result<[u8; 32], Strin
     }
     let b64 = &mbase[1..];
 
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let decoded = URL_SAFE_NO_PAD
         .decode(b64)
         .map_err(|e| format!("base64url decode: {e}"))?;
