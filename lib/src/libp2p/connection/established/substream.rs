@@ -26,13 +26,14 @@
 use crate::libp2p::{connection::multistream_select, read_write};
 use crate::util::leb128;
 
-use alloc::{borrow::ToOwned as _, collections::VecDeque, string::String, vec::Vec};
+use alloc::{borrow::ToOwned as _, collections::VecDeque, string::String, vec::Vec, format};
 use core::{
     fmt, mem,
     num::NonZero,
     ops::{Add, Sub},
     time::Duration,
 };
+use web_sys::console;
 
 /// State machine containing the state of a single substream of an established connection.
 pub struct Substream<TNow> {
@@ -339,6 +340,7 @@ where
         self,
         read_write: &mut read_write::ReadWrite<TNow>,
     ) -> (Option<SubstreamInner<TNow>>, Option<Event>) {
+
         match self.inner {
             SubstreamInner::InboundNegotiating(nego, was_rejected_already) => {
                 match nego.read_write(read_write) {
@@ -386,6 +388,7 @@ where
                 None,
             ),
             SubstreamInner::InboundNegotiatingAccept(nego, inbound_ty) => {
+                console::log_1(&"Substream::read_write2(): matched SubstreamInner::InboundNegotiatingAccept".into());
                 match nego.read_write(read_write) {
                     Ok(multistream_select::Negotiation::InProgress(nego)) => (
                         Some(SubstreamInner::InboundNegotiatingAccept(nego, inbound_ty)),
@@ -396,12 +399,15 @@ where
                         unreachable!()
                     }
                     Ok(multistream_select::Negotiation::Success) => match inbound_ty {
-                        InboundTy::Ping => (
-                            Some(SubstreamInner::PingIn {
-                                payload_out: VecDeque::with_capacity(32),
-                            }),
-                            None,
-                        ),
+                        InboundTy::Ping => {
+                            console::log_1(&"Substream::read_write2(): it's a ping!".into());
+                            (
+                                Some(SubstreamInner::PingIn {
+                                    payload_out: VecDeque::with_capacity(32),
+                                }),
+                                None,
+                            )
+                        },
                         InboundTy::Notifications { max_handshake_size } => (
                             Some(SubstreamInner::NotificationsInHandshake {
                                 handshake_size: None,
@@ -991,18 +997,39 @@ where
                 )
             }
 
-            SubstreamInner::PingIn { mut payload_out } => {
-                // Inbound ping substream.
+            SubstreamInner::PingIn { .. } => { //mut payload_out } => {
+                console::log_1(&"Substream::read_write2(): matched SubstreamInner::PingIn".into());
+
+                if let Ok(Some(mut ping)) = read_write.incoming_bytes_take(32) {
+                    // console::log_1(&format!(
+                    //     "Substream::read_write2(): took {} bytes our of read_write: {:?}",
+                    //     ping.len(),
+                    //     ping,
+                    // ).into());
+                    read_write.write_from_vec(&mut ping);
+                }
+                    // Inbound ping substream.
                 // The ping protocol consists in sending 32 bytes of data, which the remote has
                 // to send back.
-                read_write.write_from_vec_deque(&mut payload_out);
-                if payload_out.is_empty() {
-                    if let Ok(Some(ping)) = read_write.incoming_bytes_take(32) {
-                        payload_out.extend(ping);
-                    }
-                }
+                // read_write.write_from_vec_deque(&mut payload_out);
+                // if payload_out.is_empty() {
+                //     console::log_1(&format!(
+                //         "Substream::read_write2(): payload_out.is_empty() read_write.incoming_buffer.len(): {}",
+                //         read_write.incoming_buffer.len()
+                //     ).into());
+                //
+                //     if let Ok(Some(ping)) = read_write.incoming_bytes_take(32) {
+                //         console::log_1(&format!(
+                //             "Substream::read_write2(): took {} bytes our of read_write: {:?}",
+                //             ping.len(),
+                //             ping,
+                //         ).into());
+                //
+                //         payload_out.extend(ping);
+                //     }
+                // }
 
-                (Some(SubstreamInner::PingIn { payload_out }), None)
+                (Some(SubstreamInner::PingIn { payload_out: VecDeque::new() }), None)
             }
 
             SubstreamInner::PingOutFailed { mut queued_pings } => {

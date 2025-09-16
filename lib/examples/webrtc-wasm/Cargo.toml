@@ -13,7 +13,6 @@ smoldot = { path = "../..", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["alloc", "getrandom", "std_rng"] }
 wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["console"] }
-getrandom = { version = "0.2", features = ["js"] }
 js-sys = "0.3.77"
 wasm-bindgen-futures = "0.4.50"
 base64 = "0.22.1"

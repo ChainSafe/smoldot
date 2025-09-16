@@ -93,12 +93,16 @@ impl WebRtcFraming {
         &'a mut self,
         outer_read_write: &'a mut ReadWrite<TNow>,
     ) -> Result<InnerReadWrite<'a, TNow>, Error> {
+        // console::log_1(&format!(
+        //     "WebRtcFraming::read_write(): outer_read_write.incoming_buffer.len(): {}",
+        //     outer_read_write.incoming_buffer.len(),
+        // ).into());
+
         // Read from the incoming buffer until we have enough data for the underlying substream.
         loop {
-            // #[cfg(target_arch = "wasm32")]
             // console::log_1(
             //     &format!(
-            //         "WebRtcFraming::read_write: self.inner_stream_expected_incoming_bytes: {:?}",
+            //         "WebRtcFraming::read_write(): self.inner_stream_expected_incoming_bytes: {:?}",
             //         self.inner_stream_expected_incoming_bytes,
             //     ).into()
             // );
@@ -108,8 +112,12 @@ impl WebRtcFraming {
             // want to process the inner substream the first time ever.
             if self
                 .inner_stream_expected_incoming_bytes
-                .map_or(true, |rq_bytes| rq_bytes <= self.receive_buffer.len())
+                .map_or(false, |rq_bytes| rq_bytes > 0 && rq_bytes <= self.receive_buffer.len())
             {
+                console::log_1(&format!(
+                    "WebRtcFraming::read_write(): self.receive_buffer.len(): {}",
+                    self.receive_buffer.len(),
+                ).into());
                 break;
             }
 
@@ -125,6 +133,11 @@ impl WebRtcFraming {
                 );
                 match nom::Parser::parse(&mut parser, &outer_read_write.incoming_buffer) {
                     Ok((rest, framed_message)) => {
+                        console::log_1(&format!(
+                            "WebRtcFraming::read_write(): framed_message.len(): {}",
+                            framed_message.message.map_or(0, |m| m.len()),
+                        ).into());
+
                         // The remote has sent a `RESET_STREAM` flag, immediately stop with an error.
                         // The specification mentions that the receiver may discard any data already
                         // received, which we do.
@@ -153,6 +166,9 @@ impl WebRtcFraming {
                         if matches!(self.remote_write_state, RemoteWriteState::Open)
                             && framed_message.flags.map_or(false, |f| f == 0)
                         {
+                            // TODO: remove
+                            console::log_1(&"WebRtcFraming::read_write(): got FIN flag".into());
+
                             self.remote_write_state = RemoteWriteState::Closed;
                         }
 
@@ -160,8 +176,10 @@ impl WebRtcFraming {
 
                         // Copy the message of the remote out from the incoming buffer.
                         if let Some(message) = framed_message.message {
-                            // #[cfg(target_arch = "wasm32")]
-                            // console::log_1(&format!("WebRtcFraming::read_write: extracting {} bytes payload", message.len()).into());
+                            console::log_1(&format!(
+                                "WebRtcFraming::read_write(): extracting {} bytes payload",
+                                message.len(),
+                            ).into());
 
                             self.receive_buffer.extend_from_slice(message);
                         }
@@ -184,6 +202,8 @@ impl WebRtcFraming {
                         outer_read_write.incoming_buffer.len() - rest.len()
                     }
                     Err(nom::Err::Incomplete(needed)) => {
+                        console::log_1(&"WebRtcFraming::read_write(): need moar data!!1!".into());
+
                         // Not enough data in the incoming buffer for a full frame. Requesting
                         // more.
                         let Some(expected_incoming_bytes) =
@@ -199,7 +219,11 @@ impl WebRtcFraming {
                             };
                         break;
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        console::log_1(&format!(
+                            "WebRtcFraming::read_write(): frame decoding error: {:?}",
+                            err,
+                        ).into());
                         // Frame decoding error.
                         return Err(Error::InvalidFrame);
                     }
@@ -207,7 +231,7 @@ impl WebRtcFraming {
             };
 
             // #[cfg(target_arch = "wasm32")]
-            // console::log_1(&format!("WebRtcFraming::read_write: discarding {} bytes", bytes_to_discard).into());
+            // console::log_1(&format!("WebRtcFraming::read_write(): discarding {} bytes", bytes_to_discard).into());
 
             // Discard the frame data.
             let _extract_result = outer_read_write.incoming_bytes_take(bytes_to_discard);
@@ -279,6 +303,22 @@ impl<'a, TNow: Clone> ops::DerefMut for InnerReadWrite<'a, TNow> {
 
 impl<'a, TNow: Clone> Drop for InnerReadWrite<'a, TNow> {
     fn drop(&mut self) {
+        // #[cfg(target_arch = "wasm32")]
+        // use web_sys::console;
+        // console::log_1(&"WebRtcFraming::drop()".into());
+
+        // #[cfg(target_arch = "wasm32")]
+        // console::log_1(&format!(
+        //     "WebRtcFraming::drop(): self.inner_read_write.expected_incoming_bytes: {:?}",
+        //     self.inner_read_write.expected_incoming_bytes,
+        // ).into());
+        //
+        // #[cfg(target_arch = "wasm32")]
+        // console::log_1(&format!(
+        //     "WebRtcFraming::drop(): self.outer_read_write.expected_incoming_bytes: {:?}",
+        //     self.outer_read_write.expected_incoming_bytes,
+        // ).into());
+
         // It is possible that the inner stream processes some bytes of `self.receive_buffer`
         // and expects to be called again while no bytes was pulled from the outer `ReadWrite`.
         // If that happens, the API user will not call `read_write` again and we will have a stall.
@@ -318,6 +358,9 @@ impl<'a, TNow: Clone> Drop for InnerReadWrite<'a, TNow> {
                 self.framing.local_write_state = LocalWriteState::FinBuffered;
                 Some(0)
             } else if matches!(self.framing.remote_write_state, RemoteWriteState::Closed) {
+                // TODO: remove
+                #[cfg(target_arch = "wasm32")]
+                console::log_1(&"WebRtcFraming::drop: putting FIN_ACK in outer_read_write".into());
                 // `FIN_ACK`
                 self.framing.remote_write_state = RemoteWriteState::ClosedAckBuffered;
                 Some(3)

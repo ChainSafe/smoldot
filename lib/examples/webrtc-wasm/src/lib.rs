@@ -1,18 +1,17 @@
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 
 use smoldot::libp2p::{
-    PeerId,
+    PeerId, collection,
     connection::{noise, webrtc_framing},
     read_write::ReadWrite,
 };
 
+use smoldot::libp2p::collection::ConnectionId;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::{JsFuture, spawn_local};
-use web_sys::{console, window};
+use web_sys::console;
 
 #[wasm_bindgen]
 extern "C" {
@@ -26,7 +25,7 @@ extern "C" {
     async fn generateCertificate() -> JsValue;
 
     #[wasm_bindgen(catch)]
-    fn getCertificateFingerprint(certificate: JsValue) -> Result<js_sys::Uint8Array, JsValue>;
+    fn getCertificateMultihash(certificate: JsValue) -> Result<js_sys::Uint8Array, JsValue>;
 }
 
 #[wasm_bindgen]
@@ -45,63 +44,172 @@ pub async fn run_client(peer_address: String, send_fn: js_sys::Function) -> Resu
     Ok("doin' the ting...".to_owned())
 }
 
+type DatachannelId = u64;
+
+// A wasm-safe monotonic time type compatible with smoldot's Duration arithmetic.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct WasmInstant(u64);
+
+impl core::ops::Add<std::time::Duration> for WasmInstant {
+    type Output = Self;
+    fn add(self, rhs: std::time::Duration) -> Self::Output {
+        Self(self.0.saturating_add(rhs.as_millis() as u64))
+    }
+}
+
+impl core::ops::Sub<std::time::Duration> for WasmInstant {
+    type Output = Self;
+    fn sub(self, rhs: std::time::Duration) -> Self::Output {
+        Self(self.0.saturating_sub(rhs.as_millis() as u64))
+    }
+}
+
+impl core::ops::Sub for WasmInstant {
+    type Output = std::time::Duration;
+    fn sub(self, rhs: Self) -> Self::Output {
+        std::time::Duration::from_millis(self.0.saturating_sub(rhs.0))
+    }
+}
+
 struct Client {
+    noise_key: noise::NoiseKey,
+    local_certhash: Vec<u8>,
+    remote_certhash: Vec<u8>,
     inner: Rc<RefCell<ClientInner>>,
 }
 
 impl Client {
     async fn new(peer_address: String, send_fn: js_sys::Function) -> Result<Self, String> {
+        let mut rng = StdRng::seed_from_u64(0xC0FFEE);
+        let mut randomness_seed = [0u8; 32];
+        rng.fill_bytes(&mut randomness_seed);
+
+        let config = collection::Config {
+            randomness_seed,
+            capacity: 4,
+            max_inbound_substreams: 8,
+            max_protocol_name_len: 64,
+            handshake_timeout: std::time::Duration::from_secs(10),
+            ping_protocol: "/ipfs/ping/1.0.0".to_string(),
+        };
+
+        let mut ed25519_private = [0u8; 32];
+        rng.fill_bytes(&mut ed25519_private);
+        let mut noise_key = [0u8; 32];
+        rng.fill_bytes(&mut noise_key);
+        let noise_key = build_noise_key(&ed25519_private, &noise_key);
+
         let local_cert = generateCertificate().await;
 
         let cert_fp =
-            getCertificateFingerprint(local_cert.clone()).map_err(|e| format!("{:?}", e))?;
+            getCertificateMultihash(local_cert.clone()).map_err(|e| format!("{:?}", e))?;
 
-        let mut local_cert_sha256 = [0u8; 32];
-        cert_fp.copy_to(&mut local_cert_sha256);
+        let mut local_certhash = [0u8; 34];
+        cert_fp.copy_to(&mut local_certhash);
+        let local_certhash = Vec::from(local_certhash);
 
-        let remote_cert_sha256 = parse_remote_cert_sha256_from_multiaddr(&peer_address)
+        let remote_certhash = parse_certhash_from_multiaddr(&peer_address)
             .map_err(|e| format!("bad certhash in multiaddr: {e}"))?;
 
-        let handshaker =
-            WebRtcHandshaker::new_with_random_keys(local_cert_sha256, remote_cert_sha256);
+        let network = collection::Network::new(config);
 
         Ok(Self {
+            noise_key,
+            local_certhash,
+            remote_certhash,
             inner: Rc::new(RefCell::new(ClientInner {
                 peer_address,
                 send_fn,
                 local_cert,
-                handshaker,
-                hand_shaken: false,
-                streams: HashMap::new(),
+                network,
+                task: None,
+                connection_id: None,
+                buffers: HashMap::new(),
             })),
         })
     }
 
     async fn run(&mut self) -> Result<(), String> {
         let glue = js_sys::Object::new();
-        let inner_rc = Rc::clone(&self.inner);
 
-        let func = Closure::<dyn FnMut(js_sys::Number, js_sys::Uint8Array)>::new(
-            move |channel_id: js_sys::Number, data: js_sys::Uint8Array| {
-                let channel_id = channel_id.as_f64().unwrap() as u64;
-                let data = data.to_vec();
-                let mut this = inner_rc.borrow_mut();
+        // onDatachannelOpen()
+        {
+            let inner_rc = Rc::clone(&self.inner);
 
-                if channel_id == 0 {
-                    this.drive_handshake(channel_id, &data);
-                } else {
-                    this.drive_substream(channel_id, &data);
-                }
-            },
-        );
+            let func =
+                Closure::<dyn FnMut(js_sys::Number)>::new(move |channel_id: js_sys::Number| {
+                    let channel_id = channel_id.as_f64().unwrap() as DatachannelId;
+                    let mut this = inner_rc.borrow_mut();
+                    this.on_datachannel_open(channel_id);
+                });
+            js_sys::Reflect::set(
+                glue.as_ref(),
+                &JsValue::from_str("onDatachannelOpen"),
+                func.as_ref().unchecked_ref(),
+            )
+            .unwrap();
+            func.forget();
+        }
 
-        js_sys::Reflect::set(
-            glue.as_ref(),
-            &JsValue::from_str("onMessage"),
-            func.as_ref().unchecked_ref(),
-        )
-        .unwrap();
-        func.forget();
+        // onDatachannelClose()
+        {
+            let inner_rc = Rc::clone(&self.inner);
+
+            let func =
+                Closure::<dyn FnMut(js_sys::Number)>::new(move |channel_id: js_sys::Number| {
+                    let channel_id = channel_id.as_f64().unwrap() as DatachannelId;
+                    let mut this = inner_rc.borrow_mut();
+                    this.on_datachannel_close(channel_id);
+                });
+            js_sys::Reflect::set(
+                glue.as_ref(),
+                &JsValue::from_str("onDatachannelClose"),
+                func.as_ref().unchecked_ref(),
+            )
+            .unwrap();
+            func.forget();
+        }
+
+        // onDatachannelError()
+        {
+            let inner_rc = Rc::clone(&self.inner);
+
+            let func = Closure::<dyn FnMut(js_sys::Number, js_sys::JsString)>::new(
+                move |channel_id: js_sys::Number, msg: js_sys::JsString| {
+                    let channel_id = channel_id.as_f64().unwrap() as DatachannelId;
+                    let mut this = inner_rc.borrow_mut();
+                    this.on_datachannel_error(channel_id, msg);
+                },
+            );
+            js_sys::Reflect::set(
+                glue.as_ref(),
+                &JsValue::from_str("onDatachannelError"),
+                func.as_ref().unchecked_ref(),
+            )
+            .unwrap();
+            func.forget();
+        }
+
+        // onMessage()
+        {
+            let inner_rc = Rc::clone(&self.inner);
+
+            let func = Closure::<dyn FnMut(js_sys::Number, js_sys::Uint8Array)>::new(
+                move |channel_id: js_sys::Number, data: js_sys::Uint8Array| {
+                    let channel_id = channel_id.as_f64().unwrap() as DatachannelId;
+                    let data = data.to_vec();
+                    let mut this = inner_rc.borrow_mut();
+                    this.on_message(channel_id, &data);
+                },
+            );
+            js_sys::Reflect::set(
+                glue.as_ref(),
+                &JsValue::from_str("onMessage"),
+                func.as_ref().unchecked_ref(),
+            )
+            .unwrap();
+            func.forget();
+        }
 
         let (peer_address, local_cert) = {
             let this = self.inner.borrow();
@@ -112,6 +220,36 @@ impl Client {
             .await
             .map_err(|e| format!("dial error: {:?}", e))?;
 
+        {
+            let mut inner = self.inner.borrow_mut();
+            let (connection_id, mut task) = inner.network.insert_multi_stream(
+                WasmInstant(0),
+                collection::MultiStreamHandshakeKind::WebRtc {
+                    is_initiator: true,
+                    noise_key: &self.noise_key,
+                    local_tls_certificate_multihash: self.local_certhash.clone(),
+                    remote_tls_certificate_multihash: self.remote_certhash.clone(),
+                },
+                16,
+                None,
+            );
+
+            // on_message() inserts a ReadWrite if none exists for a channel. We add one for channel
+            // 0 here so that we can refuse to handle any more messages on channel 0 after the
+            // handshake. This is done by removing the ReadWrite from the map in on_message() when
+            // handshake completion is detected.
+            inner.buffers.insert(0, empty_read_write());
+
+            task.add_substream(0, true);
+            let (task_update, msg) = task.pull_message_to_coordinator(); // TODO: call in a loop until msg is None
+            if let Some(msg) = msg {
+                console::log_1(&"Client::run(): got an msg for coordinator from task".into());
+                inner.network.inject_connection_message(connection_id, msg)
+            }
+
+            inner.task = task_update;
+            inner.connection_id = Some(connection_id);
+        }
         Ok(())
     }
 }
@@ -120,89 +258,226 @@ struct ClientInner {
     peer_address: String,
     send_fn: js_sys::Function,
     local_cert: JsValue,
-    handshaker: WebRtcHandshaker,
-    hand_shaken: bool,
-    streams: HashMap<u64, ReadWrite<u64>>,
+    network: collection::Network<Option<String>, WasmInstant>,
+    task: Option<collection::MultiStreamConnectionTask<WasmInstant, DatachannelId>>,
+    connection_id: Option<ConnectionId>,
+    buffers: HashMap<DatachannelId, ReadWrite<WasmInstant>>,
 }
 
 impl ClientInner {
-    fn drive_handshake(&mut self, channel_id: u64, data: &[u8]) {
-        if self.hand_shaken {
-            // TODO check FIN flag and respond with FIN_ACK using WebRtcFraming::read_write()
-            console::log_1(&"handshake already done".into());
-            return;
-        }
-
-        let mut rw = self.streams.entry(channel_id).or_insert_with(empty_read_write);
-        rw.incoming_buffer.extend_from_slice(data);
-
-        match self.handshaker.drive_once(rw) {
-            Err(e) => {
-                console::log_1(&format!("handshake error: {e:?}").into());
+    // datachannel was opened by the remote
+    fn on_datachannel_open(&mut self, channel_id: DatachannelId) {
+        console::log_1(&format!("data channel {channel_id} opened").into());
+        let mut task = match self.task.take() {
+            Some(task) => task,
+            None => {
+                console::log_1(&"ClientInner::on_data_channel_open(): no task, bailing out".into());
+                return;
             }
-            Ok(true) => {
-                console::log_1(&"outer hand successfully shaken 🤝".into());
-                self.hand_shaken = true;
-            }
-            Ok(false) => {
-                console::log_1(&"handshake in progress...".into());
-                let wake_up_now = rw.wake_up_after.is_some_and(|wua| wua <= rw.now);
-                if rw.write_buffers.is_empty() && wake_up_now {
-                    match self.handshaker.drive_once(&mut rw) {
-                        Ok(true) => {
-                            console::log_1(&"inner hand successfully shaken 🤝".into());
-                            self.hand_shaken = true;
-                        }
-                        Ok(false) => {
-                            // 🤷‍♂️
-                        }
-                        Err(e) => {
-                            console::log_1(&format!("handshake error: {e:?}").into());
-                            return;
+        };
+
+        task.add_substream(channel_id, false);
+
+        // let task = loop {
+        let (task, msg) = task.pull_message_to_coordinator();
+        // if msg.is_none() {
+        // break task;
+        if let Some(msg) = msg {
+            console::log_1(&format!(
+                "ClientInner::on_datachannel_open(channel_id={channel_id}): got an msg for coordinator from task"
+            ).into());
+            self.network
+                .inject_connection_message(self.connection_id.unwrap(), msg);
+
+            loop {
+                match self.network.next_event() {
+                    None => break,
+                    Some(collection::Event::HandshakeFinished { id, peer_id }) => {
+                        #[cfg(target_arch = "wasm32")]
+                            console::log_1(&format!(
+                                "ClientInner::on_datachannel_open(channel_id={channel_id}): handshake on connection {id:?} finished! peer ID: {peer_id}",
+                            ).into());
+                        break;
+                    }
+                    Some(collection::Event::InboundNegotiated { protocol_name, substream_id, .. }) => {
+                        #[cfg(target_arch = "wasm32")]
+                            console::log_1(&format!(
+                                "ClientInner::on_datachannel_open(channel_id={channel_id}): inbound negotiated protocol {protocol_name}",
+                            ).into());
+                        if protocol_name == "/ipfs/ping/1.0.0" {
+                            self.network.accept_inbound(substream_id, collection::InboundTy::Ping);
+                        } else {
+                            self.network.reject_inbound(substream_id);
                         }
                     }
-                }
-
-                if rw.write_buffers.is_empty() {
-                    console::log_1(
-                        &"still nothing to send, nothing more to read. waiting for more data..."
-                            .into(),
-                    );
-                    return;
-                }
-
-                for chunk in rw.write_buffers.drain(..) {
-                    send(channel_id, &chunk, self.send_fn.clone());
+                    _ => {
+                        #[cfg(target_arch = "wasm32")]
+                            console::log_1(&format!(
+                                "ClientInner::on_datachannel_open(channel_id={channel_id}): some other stuff happened, will keep polling self.network.next_event()"
+                            ).into());
+                    }
                 }
             }
+        }
+        // }
+
+        self.task = task;
+        if self.task.is_none() {
+            console::log_1(&format!(
+                "ClientInner::on_datachannel_open(channel_id={channel_id}): MultiStreamConnectionTask consumed itself 🤷‍️"
+            ).into());
         }
     }
 
-    fn drive_substream(&mut self, channel_id: u64, data: &[u8]) {
-        if !self.hand_shaken {
+    fn on_datachannel_close(&mut self, channel_id: DatachannelId) {
+        console::log_1(&format!("data channel {channel_id} closed").into());
+        if let Some(task) = &mut self.task {
+            task.reset_substream(&channel_id); // TODO pull msg for coordinator
+            self.buffers.remove(&channel_id);
+        }
+    }
+
+    fn on_datachannel_error(&mut self, channel_id: DatachannelId, msg: js_sys::JsString) {
+        console::log_1(&format!("data channel {channel_id} error: {msg}").into());
+        if let Some(task) = &mut self.task {
+            task.reset_substream(&channel_id); // TODO pull msg for coordinator
+            self.buffers.remove(&channel_id);
+        }
+    }
+
+    fn on_message(&mut self, channel_id: DatachannelId, data: &[u8]) {
+        console::log_1(&format!("ClientInner::on_message(channel_id={channel_id}): {} bytes received", data.len()).into());
+
+        if channel_id == 0 && !self.buffers.contains_key(&channel_id) {
             console::log_1(
-                &format!(
-                    "got message on channel {channel_id} before completing handshake. ignoring"
-                )
-                    .into(),
+                &"ClientInner::on_message(): not touching channel 0 again after handshake".into(),
             );
+            return;
         }
 
-        let rw = self.streams.entry(channel_id).or_insert_with(empty_read_write);
+        let mut task = match self.task.take() {
+            Some(task) => task,
+            None => {
+                console::log_1(&format!(
+                    "ClientInner::on_message(channel_id={channel_id}): no task, dropping message"
+                ).into());
+                return;
+            }
+        };
+
+        let rw = self
+            .buffers
+            .entry(channel_id)
+            .or_insert_with(empty_read_write);
         rw.incoming_buffer.extend_from_slice(data);
 
-        let mut framing = webrtc_framing::WebRtcFraming::new();
+        // #[cfg(target_arch = "wasm32")]
+        // console::log_1(&format!(
+        //     "ClientInner::on_message(): rw.incoming_buffer.len(): {}",
+        //     rw.incoming_buffer.len(),
+        // ).into());
 
-        match framing.read_write(rw) {
-            Err(e) => {
-                console::log_1(&format!("Framing error: {e:?}").into());
-            }
-            Ok(mut inner) => {
-                for chunk in inner.write_buffers.drain(..) {
-                    send(channel_id, &chunk, self.send_fn.clone());
+        // #[cfg(target_arch = "wasm32")]
+        // console::log_1(&format!(
+        //     "ClientInner::on_message(): rw.expected_incoming_bytes: {:?} rw.write_bytes_queable: {:?}",
+        //     rw.expected_incoming_bytes,
+        //     rw.write_bytes_queueable,
+        // ).into());
+
+        // let _ = task.substream_read_write(&channel_id, rw);
+
+        if matches!(
+            task.substream_read_write(&channel_id, rw),
+            collection::SubstreamFate::Reset,
+        ) {
+            console::log_1(
+                &format!("ClientInner::on_message(channel_id={channel_id}): channel has been reset").into()
+            );
+            self.buffers.remove(&channel_id);
+            self.task = Some(task);
+            return;
+        }
+
+        let (task_update, msg) = task.pull_message_to_coordinator();
+        self.task = task_update;
+        if let Some(msg) = msg {
+            console::log_1(&format!(
+                "ClientInner::on_message(channel_id={channel_id}): got a msg for coordinator from task"
+            ).into());
+            self.network.inject_connection_message(self.connection_id.unwrap(), msg);
+
+            loop {
+                match self.network.next_event() {
+                    None => break,
+                    Some(collection::Event::HandshakeFinished { id, peer_id }) => {
+                        #[cfg(target_arch = "wasm32")]
+                        console::log_1(&format!(
+                            "ClientInner::on_message(channel_id={channel_id}): handshake on connection {id:?} finished! peer ID: {peer_id}"
+                        ).into());
+                        break;
+                    }
+                    Some(collection::Event::InboundNegotiated { protocol_name, substream_id, .. }) => {
+                        #[cfg(target_arch = "wasm32")]
+                        console::log_1(&format!(
+                            "ClientInner::on_message(channel_id={channel_id}): inbound negotiated protocol {protocol_name}"
+                        ).into());
+                        if protocol_name == "/ipfs/ping/1.0.0" {
+                            self.network.accept_inbound(substream_id, collection::InboundTy::Ping);
+                            if let Some((_, msg)) = self.network.pull_message_to_connection() {
+                                if let Some(mut task) = self.task.take() {
+                                    let not_really_now_but_dunno_what_else_to_do = WasmInstant(0);
+                                    task.inject_coordinator_message(&not_really_now_but_dunno_what_else_to_do, msg);
+                                    if matches!(
+                                        task.substream_read_write(&channel_id, rw),
+                                        collection::SubstreamFate::Reset,
+                                    ) {
+                                        console::log_1(&format!(
+                                            "ClientInner::on_message(): channel {channel_id} has been reset"
+                                        ).into());
+                                        self.buffers.remove(&channel_id);
+                                        self.task = Some(task);
+                                        return;
+                                    }
+                                    // TODO: pull msg for coordinator again
+                                    self.task = Some(task);
+                                }
+                            }
+                        } else {
+                            self.network.reject_inbound(substream_id);
+                        }
+                    }
+                    _ => {
+                        #[cfg(target_arch = "wasm32")]
+                        console::log_1(&format!(
+                            "ClientInner::on_message(channel_id={channel_id}): some other stuff happened, will keep polling self.network.next_event()"
+                        ).into());
+                    }
                 }
             }
         }
+
+        // let mut total = 0;
+
+        // let mut all_the_bytes = Vec::new();
+
+        for chunk in rw.write_buffers.drain(..) {
+            // TODO: figure out how this happens and why *not* sending 0 bytes makes the ping work 🤪
+            if chunk.is_empty() {
+                console::log_1(&format!(
+                    "ClientInner::on_message(channel_id={channel_id}): empty chunk in write_buffers, skipping"
+                ).into());
+                continue;
+            }
+            send(channel_id, &chunk, self.send_fn.clone());
+            // all_the_bytes.extend_from_slice(&chunk);
+            // total += chunk.len();
+        }
+
+        // if total > 0 {
+        //     console::log_1(&format!(
+        //         "ClientInner::on_message(channel_id={channel_id}): sent {total} bytes: {all_the_bytes:?}"
+        //     ).into());
+        // }
     }
 }
 
@@ -214,22 +489,11 @@ fn send(channel_id: u64, data: &[u8], send_fn: js_sys::Function) {
     }
 }
 
-pub async fn async_sleep(millis: i32) {
-    let window = window().expect("should have a window");
-    let promise = JsFuture::from(js_sys::Promise::new(&mut |resolve, _reject| {
-        window
-            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis)
-            .unwrap();
-    }));
-
-    promise.await.unwrap();
-}
-
-fn empty_read_write() -> ReadWrite<u64> {
+fn empty_read_write() -> ReadWrite<WasmInstant> {
     ReadWrite {
-        now: 0u64, // this is for WASM compatibility
+        now: WasmInstant(0), // 0 for WASM compatibility
         incoming_buffer: Vec::new(),
-        expected_incoming_bytes: None,
+        expected_incoming_bytes: Some(0),
         read_bytes: 0,
         write_buffers: Vec::new(),
         write_bytes_queued: 0,
@@ -416,7 +680,7 @@ pub fn handshake_with_webrtc_dc(
     }
 }
 
-fn parse_remote_cert_sha256_from_multiaddr(addr: &str) -> Result<[u8; 32], String> {
+fn parse_certhash_from_multiaddr(addr: &str) -> Result<Vec<u8>, String> {
     // Find "/certhash/<mbase>" and decode the multibase base64url (no padding),
     // then verify multihash header 0x12 0x20 and extract the 32-byte digest.
     let key = "/certhash/";
@@ -429,6 +693,7 @@ fn parse_remote_cert_sha256_from_multiaddr(addr: &str) -> Result<[u8; 32], Strin
     if !mbase.starts_with('u') {
         return Err("certhash must be base64url multibase (prefix 'u')".into());
     }
+
     let b64 = &mbase[1..];
 
     use base64::Engine as _;
@@ -439,7 +704,5 @@ fn parse_remote_cert_sha256_from_multiaddr(addr: &str) -> Result<[u8; 32], Strin
     if decoded.len() != 34 || decoded[0] != 0x12 || decoded[1] != 0x20 {
         return Err("certhash must be multihash sha2-256/32".into());
     }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&decoded[2..]);
-    Ok(out)
+    Ok(decoded)
 }

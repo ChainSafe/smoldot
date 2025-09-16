@@ -66,7 +66,7 @@ use rand_chacha::{
     ChaCha20Rng,
     rand_core::{RngCore as _, SeedableRng as _},
 };
-
+use web_sys::console;
 pub use super::peer_id::PeerId;
 pub use super::read_write::ReadWrite;
 pub use established::{InboundError, InboundTy, SubstreamFate};
@@ -496,6 +496,7 @@ where
                 user_data,
             },
         );
+
         debug_assert!(_previous_value.is_none());
 
         (connection_id, connection_task)

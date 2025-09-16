@@ -22,7 +22,7 @@ use super::{
 };
 use crate::{libp2p::connection::webrtc_framing, util};
 
-use alloc::{collections::VecDeque, string::String, vec::Vec};
+use alloc::{collections::VecDeque, string::String, vec::Vec, format};
 use core::{
     fmt,
     hash::Hash,
@@ -30,7 +30,7 @@ use core::{
     time::Duration,
 };
 use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
-
+use web_sys::console;
 pub use substream::InboundTy;
 
 /// State machine of a fully-established connection where substreams are handled externally.
@@ -281,7 +281,10 @@ where
         substream_id: &TSubId,
         read_write: &mut ReadWrite<TNow>,
     ) -> SubstreamFate {
+        // console::log_1(&"MultiStream::substream_read_write(): before unwrap()".into());
         let substream = self.in_substreams.get_mut(substream_id).unwrap();
+
+        // console::log_1(&"MultiStream::substream_read_write(): before assert".into());
 
         // In WebRTC, the reading and writing side is never closed.
         assert!(
@@ -289,8 +292,11 @@ where
                 && read_write.write_bytes_queueable.is_some()
         );
 
+        // console::log_1(&"MultiStream::substream_read_write(): after assert".into());
+
         // Reading/writing the ping substream is used to queue new outgoing pings.
         if Some(substream_id) == self.ping_substream.as_ref() {
+            console::log_1(&"MultiStream::substream_read_write(): it's the ping substream!".into());
             if read_write.now >= self.next_ping {
                 let mut payload = [0u8; 32];
                 self.ping_payload_randomness.fill_bytes(&mut payload);
@@ -307,12 +313,25 @@ where
 
         // Don't process any more data before events are pulled.
         if self.pending_events.len() >= MAX_PENDING_EVENTS {
+            console::log_1(&"MultiStream::substream_read_write(): gotta pull events bro".into());
             return SubstreamFate::Continue;
         }
+
+        // console::log_1(&"MultiStream::substream_read_write(): calling substream.framing.read_write()".into());
+
+        console::log_1(&format!(
+            "MultiStream::substream_read_write(): calling substream.framing.read_write() with read_write.incoming_buffer.len(): {}",
+            read_write.incoming_buffer.len(),
+        ).into());
 
         // Now process the substream.
         let event = match substream.framing.read_write(read_write) {
             Ok(mut framing) => {
+                console::log_1(&format!(
+                    "MultiStream::substream_read_write(): framing.incoming_buffer.len(): {}",
+                    framing.incoming_buffer.len(),
+                ).into());
+
                 let (substream_update, event) =
                     substream.inner.take().unwrap().read_write(&mut framing);
                 substream.inner = substream_update;
@@ -322,6 +341,8 @@ where
         };
 
         if let Some(event) = event {
+            console::log_1(&"MultiStream::substream_read_write(): we got an event".into());
+
             read_write.wake_up_asap();
             Self::on_substream_event(
                 &mut self.pending_events,

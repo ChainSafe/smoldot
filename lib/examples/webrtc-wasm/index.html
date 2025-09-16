@@ -40,9 +40,10 @@
         type="text"
         placeholder="Enter peer multiaddress"
 >
-<button onclick="runDemo()">Run WebRTC Demo</button>
+<button id="runDemo" onclick="runDemo()">Run WebRTC Demo</button>
 
 <div id="output"></div>
+
 
 <script type="module">
   import {multiaddr, CODE_IP4, CODE_UDP, CODE_CERTHASH} from 'https://esm.sh/@multiformats/multiaddr@12.5.1';
@@ -73,6 +74,8 @@
   const channels = {}; // channelId -> DataChannel
 
   export function sendTo(channelId, data) {
+    // console.log(`JS: sending ${data.length} bytes to channel ${channelId}: ${String(data)}`);
+
     const channel = channels[channelId];
 
     if (!channel) {
@@ -98,7 +101,7 @@
 
   globalThis.generateCertificate = generateCertificate;
 
-  export function getCertificateFingerprint(certificate) {
+  export function getCertificateMultihash(certificate) {
     const fp = certificate.getFingerprints().find(f => f.algorithm.toUpperCase() === 'SHA-256');
     if (!fp) throw new Error('No SHA-256 fingerprint on certificate');
 
@@ -109,12 +112,19 @@
       out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
     }
 
-    return out;
+    const mh = new Uint8Array(2 + 32);
+    mh[0] = 0x12;
+    mh[1] = 0x20;
+    mh.set(out, 2);
+    return mh;
   }
 
-  globalThis.getCertificateFingerprint = getCertificateFingerprint;
+  globalThis.getCertificateMultihash = getCertificateMultihash;
 
   // glue should have the following method(s):
+  // onDatachannelOpen(channelId: Number): void;
+  // onDatachannelClose(channelId: Number): void;
+  // onDatachannelError(channelId: Number, msg: String): void;
   // onMessage(channelId: Number, data: Uint8Array): void;
   export async function dialWebRtcDirect(address, certificate, glue) {
     const pc = new RTCPeerConnection({certificates: [certificate], iceServers: []});
@@ -125,9 +135,20 @@
 
       event.channel.onmessage = dataEvent => {
         const data = new Uint8Array(dataEvent.data);
-        console.log(`JS: ${data.length} bytes received on channel ${event.channel.id}`);
+        // console.log(`JS: ${data.length} bytes received on channel ${event.channel.id}: ${String(data)}`);
         glue.onMessage(event.channel.id, data);
       };
+
+      event.channel.onclose = () => {
+        glue.onDatachannelClose(event.channel.id);
+      }
+
+      event.channel.onerror = err => {
+        const msg = `${err}`;
+        glue.onDatachannelError(event.channel.id, msg);
+      }
+
+      glue.onDatachannelOpen(event.channel.id);
     };
 
     const dc = pc.createDataChannel('', {
@@ -140,11 +161,18 @@
     dc.binaryType = 'arraybuffer';
     dc.onmessage = event => {
       const data = new Uint8Array(event.data);
+      // console.log(`JS: ${data.length} bytes received on channel ${dc.id}`); //: ${data}`);
       glue.onMessage(dc.id, data);
     };
 
-    dc.onclose = () => console.log('JS: channel 0 closed');
-    dc.onerror = err => console.error(`JS: channel 0 error: ${err.message}`);
+    dc.onclose = () => {
+      glue.onDatachannelClose(dc.id);
+    }
+
+    dc.onerror = err => {
+      const msg = `${err}`;
+      glue.onDatachannelError(dc.id, msg);
+    }
 
     // Build answer and offer with patched ICE ufrag/pwd with libp2p tag
     const ufrag = `libp2p+webrtc+v1/${randomString()}`;

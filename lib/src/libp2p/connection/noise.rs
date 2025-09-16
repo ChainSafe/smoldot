@@ -83,6 +83,11 @@ use crate::{
 use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
 use core::{cmp, fmt, iter, mem, ops};
 
+// TODO: remove
+#[cfg(target_arch = "wasm32")]
+use web_sys::console;
+use alloc::format;
+
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/noise";
 
@@ -602,6 +607,12 @@ impl HandshakeInProgress {
                 if read_write.write_bytes_queueable.is_none() {
                     return Err(HandshakeError::WriteClosed);
                 }
+
+                #[cfg(target_arch = "wasm32")]
+                console::log_1(&
+                    "HandshakeInProgress::read_write(): unable to write all data, bailing without reading any"
+                .into());
+
                 return Ok(NoiseHandshake::InProgress(self));
             }
 
@@ -647,6 +658,13 @@ impl HandshakeInProgress {
                     },
                 });
             }
+
+            // #[cfg(target_arch = "wasm32")]
+            // console::log_1(&format!(
+            //     "HandshakeInProgress::read_write(): self.0.num_buffered_or_transmitted_messages: {}: self.0.is_initiator: {}",
+            //     self.0.num_buffered_or_transmitted_messages,
+            //     self.0.is_initiator,
+            // ).into());
 
             // If the handshake is in a phase where we need to send out more data, queue said
             // data to `pending_out_data` and continue.
@@ -822,6 +840,12 @@ impl HandshakeInProgress {
             // Since we have no more data to write out, and that the handshake isn't finished yet,
             // the next step is necessarily receiving a message sent by the remote.
 
+            // #[cfg(target_arch = "wasm32")]
+            // console::log_1(&format!(
+            //     "HandshakeInProgress::read_write(): read_write.incoming_buffer.len(): {}",
+            //     read_write.incoming_buffer.len(),
+            // ).into());
+
             // Grab the size of the next message, either from `self` or by extracting 2 bytes from
             // the incoming buffer.
             let next_in_message_size =
@@ -833,6 +857,11 @@ impl HandshakeInProgress {
                             u16::from_be_bytes(<[u8; 2]>::try_from(&size_buffer[..2]).unwrap()),
                         ),
                         Ok(None) => {
+                            // #[cfg(target_arch = "wasm32")]
+                            // console::log_1(&
+                            //     "HandshakeInProgress::read_write(): not enough data in incoming buffer"
+                            // .into());
+
                             // Not enough data in incoming buffer.
                             return Ok(NoiseHandshake::InProgress(self));
                         }
@@ -841,6 +870,12 @@ impl HandshakeInProgress {
                         }
                     }
                 };
+
+            // #[cfg(target_arch = "wasm32")]
+            // console::log_1(&format!(
+            //     "HandshakeInProgress::read_write(): after. self.0.next_in_message_size: {:?}",
+            //     self.0.next_in_message_size,
+            // ).into());
 
             // Extract the message from the incoming buffer.
             let available_message =
