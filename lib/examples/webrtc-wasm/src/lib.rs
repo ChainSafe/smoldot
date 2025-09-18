@@ -26,6 +26,8 @@ extern "C" {
 
     #[wasm_bindgen(catch)]
     fn getCertificateMultihash(certificate: JsValue) -> Result<js_sys::Uint8Array, JsValue>;
+
+    fn now() -> js_sys::Number;
 }
 
 #[wasm_bindgen]
@@ -48,23 +50,29 @@ type DatachannelId = u64;
 
 // A wasm-safe monotonic time type compatible with smoldot's Duration arithmetic.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct WasmInstant(u64);
+struct Instant(u64);
 
-impl core::ops::Add<std::time::Duration> for WasmInstant {
+impl Instant {
+    fn now() -> Self {
+        Self(now().as_f64().unwrap() as u64)
+    }
+}
+
+impl core::ops::Add<std::time::Duration> for Instant {
     type Output = Self;
     fn add(self, rhs: std::time::Duration) -> Self::Output {
         Self(self.0.saturating_add(rhs.as_millis() as u64))
     }
 }
 
-impl core::ops::Sub<std::time::Duration> for WasmInstant {
+impl core::ops::Sub<std::time::Duration> for Instant {
     type Output = Self;
     fn sub(self, rhs: std::time::Duration) -> Self::Output {
         Self(self.0.saturating_sub(rhs.as_millis() as u64))
     }
 }
 
-impl core::ops::Sub for WasmInstant {
+impl core::ops::Sub for Instant {
     type Output = std::time::Duration;
     fn sub(self, rhs: Self) -> Self::Output {
         std::time::Duration::from_millis(self.0.saturating_sub(rhs.0))
@@ -125,6 +133,7 @@ impl Client {
                 task: None,
                 connection_id: None,
                 buffers: HashMap::new(),
+                handshake_done: false,
             })),
         })
     }
@@ -223,7 +232,7 @@ impl Client {
         {
             let mut inner = self.inner.borrow_mut();
             let (connection_id, mut task) = inner.network.insert_multi_stream(
-                WasmInstant(0),
+                Instant(0),
                 collection::MultiStreamHandshakeKind::WebRtc {
                     is_initiator: true,
                     noise_key: &self.noise_key,
@@ -258,74 +267,102 @@ struct ClientInner {
     peer_address: String,
     send_fn: js_sys::Function,
     local_cert: JsValue,
-    network: collection::Network<Option<String>, WasmInstant>,
-    task: Option<collection::MultiStreamConnectionTask<WasmInstant, DatachannelId>>,
+    network: collection::Network<Option<String>, Instant>,
+    task: Option<collection::MultiStreamConnectionTask<Instant, DatachannelId>>,
     connection_id: Option<ConnectionId>,
-    buffers: HashMap<DatachannelId, ReadWrite<WasmInstant>>,
+    buffers: HashMap<DatachannelId, ReadWrite<Instant>>,
+    handshake_done: bool,
 }
 
 impl ClientInner {
     // datachannel was opened by the remote
     fn on_datachannel_open(&mut self, channel_id: DatachannelId) {
         console::log_1(&format!("data channel {channel_id} opened").into());
-        let mut task = match self.task.take() {
-            Some(task) => task,
-            None => {
-                console::log_1(&"ClientInner::on_data_channel_open(): no task, bailing out".into());
-                return;
+
+        if self.task.is_some() {
+            self.task.as_mut().unwrap().add_substream(channel_id, false);
+        }
+
+        loop {
+            let task = match self.task.take() {
+                Some(task) => task,
+                None => {
+                    console::log_1(&format!(
+                        "ClientInner::on_data_channel_open(channel_id={channel_id}): task disappeared, bailing out"
+                    ).into());
+                    return;
+                }
+            };
+
+            let mut got_coordinator_msg = true;
+            let mut got_connection_msg = true;
+            let mut got_network_event = true;
+
+            let (task, msg) = task.pull_message_to_coordinator();
+            self.task = task;
+            if let Some(msg) = msg {
+                console::log_1(&format!(
+                    "ClientInner::on_datachannel_open(channel_id={channel_id}): got a msg for coordinator from task"
+                ).into());
+                self.network.inject_connection_message(self.connection_id.unwrap(), msg);
+            } else {
+                got_coordinator_msg = false;
             }
-        };
 
-        task.add_substream(channel_id, false);
-
-        // let task = loop {
-        let (task, msg) = task.pull_message_to_coordinator();
-        // if msg.is_none() {
-        // break task;
-        if let Some(msg) = msg {
-            console::log_1(&format!(
-                "ClientInner::on_datachannel_open(channel_id={channel_id}): got an msg for coordinator from task"
-            ).into());
-            self.network
-                .inject_connection_message(self.connection_id.unwrap(), msg);
-
-            loop {
-                match self.network.next_event() {
-                    None => break,
-                    Some(collection::Event::HandshakeFinished { id, peer_id }) => {
-                        #[cfg(target_arch = "wasm32")]
-                            console::log_1(&format!(
-                                "ClientInner::on_datachannel_open(channel_id={channel_id}): handshake on connection {id:?} finished! peer ID: {peer_id}",
-                            ).into());
-                        break;
-                    }
-                    Some(collection::Event::InboundNegotiated { protocol_name, substream_id, .. }) => {
-                        #[cfg(target_arch = "wasm32")]
-                            console::log_1(&format!(
-                                "ClientInner::on_datachannel_open(channel_id={channel_id}): inbound negotiated protocol {protocol_name}",
-                            ).into());
-                        if protocol_name == "/ipfs/ping/1.0.0" {
-                            self.network.accept_inbound(substream_id, collection::InboundTy::Ping);
-                        } else {
-                            self.network.reject_inbound(substream_id);
-                        }
-                    }
-                    _ => {
-                        #[cfg(target_arch = "wasm32")]
-                            console::log_1(&format!(
-                                "ClientInner::on_datachannel_open(channel_id={channel_id}): some other stuff happened, will keep polling self.network.next_event()"
-                            ).into());
+            match self.network.next_event() {
+                Some(collection::Event::HandshakeFinished { id, peer_id }) => {
+                    console::log_1(&format!(
+                        "ClientInner::on_datachannel_open(channel_id={channel_id}): handshake on connection {id:?} finished! peer ID: {peer_id}",
+                    ).into());
+                }
+                Some(collection::Event::InboundNegotiated {
+                    protocol_name,
+                    substream_id,
+                    ..
+                }) => {
+                    console::log_1(&format!(
+                        "ClientInner::on_datachannel_open(channel_id={channel_id}): inbound negotiated protocol {protocol_name}",
+                    ).into());
+                    if protocol_name == "/ipfs/ping/1.0.0" {
+                        self.network.accept_inbound(substream_id, collection::InboundTy::Ping);
+                    } else {
+                        self.network.reject_inbound(substream_id);
                     }
                 }
+                None => {
+                    got_network_event = false;
+                }
+                _ => {
+                    console::log_1(&format!(
+                        "ClientInner::on_datachannel_open(channel_id={channel_id}): some other stuff happened, will keep pumping messages and events"
+                    ).into());
+                }
             }
-        }
-        // }
 
-        self.task = task;
-        if self.task.is_none() {
-            console::log_1(&format!(
-                "ClientInner::on_datachannel_open(channel_id={channel_id}): MultiStreamConnectionTask consumed itself 🤷‍️"
-            ).into());
+            let stuff = self.network.pull_message_to_connection();
+            if self.task.is_some() && stuff.is_some() {
+                let not_really_now_but_dunno_what_else_to_do = Instant(0);
+                self.task.as_mut().unwrap().inject_coordinator_message(
+                    &not_really_now_but_dunno_what_else_to_do,
+                    stuff.unwrap().1,
+                );
+                // FIXME:
+                // let subs_wanted = task.unwrap().desired_outbound_substreams();
+                // if subs_wanted > 0 {
+                //     console::log_1(&format!(
+                //         "the powers that be want us to open {subs_wanted} substreams. ain't gonna do it though"
+                //     ).into());
+                // }
+            } else if stuff.is_none() {
+                got_connection_msg = false;
+            }
+
+            if !got_coordinator_msg && !got_connection_msg && !got_network_event {
+                console::log_1(&format!(
+                    "ClientInner::on_datachannel_open(channel_id={channel_id}): no messages or events left"
+                ).into());
+                break;
+            }
         }
     }
 
@@ -346,138 +383,156 @@ impl ClientInner {
     }
 
     fn on_message(&mut self, channel_id: DatachannelId, data: &[u8]) {
-        console::log_1(&format!("ClientInner::on_message(channel_id={channel_id}): {} bytes received", data.len()).into());
+        console::log_1(
+            &format!(
+                "ClientInner::on_message(channel_id={channel_id}): {} bytes received",
+                data.len()
+            )
+            .into(),
+        );
 
-        if channel_id == 0 && !self.buffers.contains_key(&channel_id) {
+        if channel_id == 0 && self.handshake_done {
             console::log_1(
                 &"ClientInner::on_message(): not touching channel 0 again after handshake".into(),
             );
             return;
         }
 
-        let mut task = match self.task.take() {
-            Some(task) => task,
-            None => {
-                console::log_1(&format!(
-                    "ClientInner::on_message(channel_id={channel_id}): no task, dropping message"
-                ).into());
-                return;
-            }
-        };
+        let is_ping = channel_id != 0 && data.len() == 35; // HACK HACK HACK
 
+        // let mut rw = make_read_write_with(data);
         let rw = self
             .buffers
             .entry(channel_id)
             .or_insert_with(empty_read_write);
+
         rw.incoming_buffer.extend_from_slice(data);
+        rw.now = Instant::now();
 
-        // #[cfg(target_arch = "wasm32")]
-        // console::log_1(&format!(
-        //     "ClientInner::on_message(): rw.incoming_buffer.len(): {}",
-        //     rw.incoming_buffer.len(),
-        // ).into());
+        loop {
+            let mut task = match self.task.take() {
+                Some(task) => task,
+                None => {
+                    console::log_1(&format!(
+                        "ClientInner::on_message(channel_id={channel_id}): no task, bailing out"
+                    ).into());
+                    break;
+                }
+            };
 
-        // #[cfg(target_arch = "wasm32")]
-        // console::log_1(&format!(
-        //     "ClientInner::on_message(): rw.expected_incoming_bytes: {:?} rw.write_bytes_queable: {:?}",
-        //     rw.expected_incoming_bytes,
-        //     rw.write_bytes_queueable,
-        // ).into());
+            if matches!(
+                task.substream_read_write(&channel_id, rw),
+                collection::SubstreamFate::Reset,
+            ) {
+                console::log_1(&format!(
+                    "ClientInner::on_message(channel_id={channel_id}): channel has been reset"
+                ).into());
+                self.handshake_done = channel_id == 0; // HACK HACK HACK
+                // self.buffers.remove(&channel_id); // FIXME
+                self.task = Some(task);
+                break;
+            }
 
-        // let _ = task.substream_read_write(&channel_id, rw);
+            let mut got_coordinator_msg = true;
+            let mut got_connection_msg = true;
+            let mut got_network_event = true;
 
-        if matches!(
-            task.substream_read_write(&channel_id, rw),
-            collection::SubstreamFate::Reset,
-        ) {
-            console::log_1(
-                &format!("ClientInner::on_message(channel_id={channel_id}): channel has been reset").into()
-            );
-            self.buffers.remove(&channel_id);
-            self.task = Some(task);
-            return;
-        }
+            let (task, msg) = task.pull_message_to_coordinator();
+            self.task = task;
+            if let Some(msg) = msg {
+                self.network.inject_connection_message(self.connection_id.unwrap(), msg);
+            } else {
+                got_coordinator_msg = false;
+            }
 
-        let (task_update, msg) = task.pull_message_to_coordinator();
-        self.task = task_update;
-        if let Some(msg) = msg {
-            console::log_1(&format!(
-                "ClientInner::on_message(channel_id={channel_id}): got a msg for coordinator from task"
-            ).into());
-            self.network.inject_connection_message(self.connection_id.unwrap(), msg);
-
-            loop {
-                match self.network.next_event() {
-                    None => break,
-                    Some(collection::Event::HandshakeFinished { id, peer_id }) => {
-                        #[cfg(target_arch = "wasm32")]
-                        console::log_1(&format!(
-                            "ClientInner::on_message(channel_id={channel_id}): handshake on connection {id:?} finished! peer ID: {peer_id}"
-                        ).into());
-                        break;
-                    }
-                    Some(collection::Event::InboundNegotiated { protocol_name, substream_id, .. }) => {
-                        #[cfg(target_arch = "wasm32")]
-                        console::log_1(&format!(
-                            "ClientInner::on_message(channel_id={channel_id}): inbound negotiated protocol {protocol_name}"
-                        ).into());
-                        if protocol_name == "/ipfs/ping/1.0.0" {
-                            self.network.accept_inbound(substream_id, collection::InboundTy::Ping);
-                            if let Some((_, msg)) = self.network.pull_message_to_connection() {
-                                if let Some(mut task) = self.task.take() {
-                                    let not_really_now_but_dunno_what_else_to_do = WasmInstant(0);
-                                    task.inject_coordinator_message(&not_really_now_but_dunno_what_else_to_do, msg);
-                                    if matches!(
-                                        task.substream_read_write(&channel_id, rw),
-                                        collection::SubstreamFate::Reset,
-                                    ) {
-                                        console::log_1(&format!(
-                                            "ClientInner::on_message(): channel {channel_id} has been reset"
-                                        ).into());
-                                        self.buffers.remove(&channel_id);
-                                        self.task = Some(task);
-                                        return;
-                                    }
-                                    // TODO: pull msg for coordinator again
-                                    self.task = Some(task);
-                                }
-                            }
-                        } else {
-                            self.network.reject_inbound(substream_id);
-                        }
-                    }
-                    _ => {
-                        #[cfg(target_arch = "wasm32")]
-                        console::log_1(&format!(
-                            "ClientInner::on_message(channel_id={channel_id}): some other stuff happened, will keep polling self.network.next_event()"
-                        ).into());
+            match self.network.next_event() {
+                Some(collection::Event::HandshakeFinished { id, peer_id }) => {
+                    console::log_1(&format!(
+                        "ClientInner::on_message(channel_id={channel_id}): handshake on connection {id:?} finished! peer ID: {peer_id}"
+                    ).into());
+                }
+                Some(collection::Event::InboundNegotiated {
+                    protocol_name,
+                    substream_id,
+                    ..
+                }) => {
+                    console::log_1(&format!(
+                        "ClientInner::on_message(channel_id={channel_id}): inbound negotiated protocol {protocol_name}"
+                    ).into());
+                    if protocol_name == "/ipfs/ping/1.0.0" {
+                        self.network.accept_inbound(substream_id, collection::InboundTy::Ping);
+                    } else {
+                        self.network.reject_inbound(substream_id);
                     }
                 }
+                None => {
+                    got_network_event = false;
+                }
+                _ => {
+                    console::log_1(&format!(
+                        "ClientInner::on_message(channel_id={channel_id}): some other stuff happened, will keep looping"
+                    ).into());
+                }
+            }
+
+            let stuff = self.network.pull_message_to_connection();
+            if self.task.is_some() && stuff.is_some() {
+                let not_really_now_but_dunno_what_else_to_do = Instant(0);
+                self.task.as_mut().unwrap().inject_coordinator_message(
+                    &not_really_now_but_dunno_what_else_to_do,
+                    stuff.unwrap().1,
+                );
+                // FIXME:
+                // let subs_wanted = task.unwrap().desired_outbound_substreams();
+                // if subs_wanted > 0 {
+                //     console::log_1(&format!(
+                //         "the powers that be want us to open {subs_wanted} substreams. ain't gonna do it though"
+                //     ).into());
+                // }
+            } else if is_ping
+                && self.task.is_some()
+                && matches!(
+                    self.task.as_mut().unwrap().substream_read_write(&channel_id, rw),
+                    collection::SubstreamFate::Reset,
+                ) {
+                    console::log_1(&format!(
+                        "ClientInner::on_message(channel_id={channel_id}): channel has been reset during ping bonus round"
+                    ).into());
+                    break;
+            } else if stuff.is_none() {
+                got_connection_msg = false;
+            }
+
+            if !got_coordinator_msg && !got_connection_msg && !got_network_event {
+                console::log_1(&format!(
+                    "ClientInner::on_message(channel_id={channel_id}): no messages or events left"
+                ).into());
+                break;
             }
         }
 
-        // let mut total = 0;
+        let mut total = 0;
 
         // let mut all_the_bytes = Vec::new();
 
         for chunk in rw.write_buffers.drain(..) {
-            // TODO: figure out how this happens and why *not* sending 0 bytes makes the ping work 🤪
+            // TODO: figure out how this happens and why sending 0 bytes breaks pings 🤪
             if chunk.is_empty() {
-                console::log_1(&format!(
-                    "ClientInner::on_message(channel_id={channel_id}): empty chunk in write_buffers, skipping"
-                ).into());
+                // console::log_1(&format!(
+                //     "ClientInner::on_message(channel_id={channel_id}): empty chunk in write_buffers, skipping"
+                // ).into());
                 continue;
             }
             send(channel_id, &chunk, self.send_fn.clone());
             // all_the_bytes.extend_from_slice(&chunk);
-            // total += chunk.len();
+            total += chunk.len();
         }
 
-        // if total > 0 {
-        //     console::log_1(&format!(
-        //         "ClientInner::on_message(channel_id={channel_id}): sent {total} bytes: {all_the_bytes:?}"
-        //     ).into());
-        // }
+        if total > 0 {
+            console::log_1(&format!(
+                "ClientInner::on_message(channel_id={channel_id}): sent {total} bytes" //: {all_the_bytes:?}"
+            ).into());
+        }
     }
 }
 
@@ -489,10 +544,23 @@ fn send(channel_id: u64, data: &[u8], send_fn: js_sys::Function) {
     }
 }
 
-fn empty_read_write() -> ReadWrite<WasmInstant> {
+fn empty_read_write() -> ReadWrite<Instant> {
     ReadWrite {
-        now: WasmInstant(0), // 0 for WASM compatibility
+        now: Instant::now(),
         incoming_buffer: Vec::new(),
+        expected_incoming_bytes: Some(0),
+        read_bytes: 0,
+        write_buffers: Vec::new(),
+        write_bytes_queued: 0,
+        write_bytes_queueable: Some(128 * 1024),
+        wake_up_after: None,
+    }
+}
+
+fn make_read_write_with(data: &[u8]) -> ReadWrite<Instant> {
+    ReadWrite {
+        now: Instant::now(),
+        incoming_buffer: Vec::from(data),
         expected_incoming_bytes: Some(0),
         read_bytes: 0,
         write_buffers: Vec::new(),

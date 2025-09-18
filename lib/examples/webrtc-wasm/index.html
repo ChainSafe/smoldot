@@ -121,6 +121,12 @@
 
   globalThis.getCertificateMultihash = getCertificateMultihash;
 
+  export function now() {
+    return Date.now();
+  }
+
+  globalThis.now = now;
+  
   // glue should have the following method(s):
   // onDatachannelOpen(channelId: Number): void;
   // onDatachannelClose(channelId: Number): void;

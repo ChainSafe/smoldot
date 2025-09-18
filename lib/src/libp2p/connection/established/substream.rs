@@ -997,39 +997,18 @@ where
                 )
             }
 
-            SubstreamInner::PingIn { .. } => { //mut payload_out } => {
-                console::log_1(&"Substream::read_write2(): matched SubstreamInner::PingIn".into());
-
-                if let Ok(Some(mut ping)) = read_write.incoming_bytes_take(32) {
-                    // console::log_1(&format!(
-                    //     "Substream::read_write2(): took {} bytes our of read_write: {:?}",
-                    //     ping.len(),
-                    //     ping,
-                    // ).into());
-                    read_write.write_from_vec(&mut ping);
-                }
-                    // Inbound ping substream.
+            SubstreamInner::PingIn { mut payload_out } => {
+                // Inbound ping substream.
                 // The ping protocol consists in sending 32 bytes of data, which the remote has
                 // to send back.
-                // read_write.write_from_vec_deque(&mut payload_out);
-                // if payload_out.is_empty() {
-                //     console::log_1(&format!(
-                //         "Substream::read_write2(): payload_out.is_empty() read_write.incoming_buffer.len(): {}",
-                //         read_write.incoming_buffer.len()
-                //     ).into());
-                //
-                //     if let Ok(Some(ping)) = read_write.incoming_bytes_take(32) {
-                //         console::log_1(&format!(
-                //             "Substream::read_write2(): took {} bytes our of read_write: {:?}",
-                //             ping.len(),
-                //             ping,
-                //         ).into());
-                //
-                //         payload_out.extend(ping);
-                //     }
-                // }
+                read_write.write_from_vec_deque(&mut payload_out);
+                if payload_out.is_empty() {
+                    if let Ok(Some(ping)) = read_write.incoming_bytes_take(32) {
+                        payload_out.extend(ping);
+                    }
+                }
 
-                (Some(SubstreamInner::PingIn { payload_out: VecDeque::new() }), None)
+                (Some(SubstreamInner::PingIn { payload_out }), None)
             }
 
             SubstreamInner::PingOutFailed { mut queued_pings } => {
