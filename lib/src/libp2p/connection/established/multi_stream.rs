@@ -296,7 +296,7 @@ where
 
         // Reading/writing the ping substream is used to queue new outgoing pings.
         if Some(substream_id) == self.ping_substream.as_ref() {
-            console::log_1(&"MultiStream::substream_read_write(): it's the ping substream!".into());
+            console::log_1(&"established::MultiStream::substream_read_write(): it's the ping substream!".into());
             if read_write.now >= self.next_ping {
                 let mut payload = [0u8; 32];
                 self.ping_payload_randomness.fill_bytes(&mut payload);
@@ -313,25 +313,12 @@ where
 
         // Don't process any more data before events are pulled.
         if self.pending_events.len() >= MAX_PENDING_EVENTS {
-            console::log_1(&"MultiStream::substream_read_write(): gotta pull events bro".into());
             return SubstreamFate::Continue;
         }
-
-        // console::log_1(&"MultiStream::substream_read_write(): calling substream.framing.read_write()".into());
-
-        console::log_1(&format!(
-            "MultiStream::substream_read_write(): calling substream.framing.read_write() with read_write.incoming_buffer.len(): {}",
-            read_write.incoming_buffer.len(),
-        ).into());
 
         // Now process the substream.
         let event = match substream.framing.read_write(read_write) {
             Ok(mut framing) => {
-                console::log_1(&format!(
-                    "MultiStream::substream_read_write(): framing.incoming_buffer.len(): {}",
-                    framing.incoming_buffer.len(),
-                ).into());
-
                 let (substream_update, event) =
                     substream.inner.take().unwrap().read_write(&mut framing);
                 substream.inner = substream_update;
@@ -341,8 +328,6 @@ where
         };
 
         if let Some(event) = event {
-            console::log_1(&"MultiStream::substream_read_write(): we got an event".into());
-
             read_write.wake_up_asap();
             Self::on_substream_event(
                 &mut self.pending_events,

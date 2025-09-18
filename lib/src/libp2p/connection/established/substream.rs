@@ -33,7 +33,7 @@ use core::{
     ops::{Add, Sub},
     time::Duration,
 };
-use web_sys::console;
+// use web_sys::console;
 
 /// State machine containing the state of a single substream of an established connection.
 pub struct Substream<TNow> {
@@ -388,7 +388,7 @@ where
                 None,
             ),
             SubstreamInner::InboundNegotiatingAccept(nego, inbound_ty) => {
-                console::log_1(&"Substream::read_write2(): matched SubstreamInner::InboundNegotiatingAccept".into());
+                // console::log_1(&"Substream::read_write2(): matched SubstreamInner::InboundNegotiatingAccept".into());
                 match nego.read_write(read_write) {
                     Ok(multistream_select::Negotiation::InProgress(nego)) => (
                         Some(SubstreamInner::InboundNegotiatingAccept(nego, inbound_ty)),
@@ -400,7 +400,7 @@ where
                     }
                     Ok(multistream_select::Negotiation::Success) => match inbound_ty {
                         InboundTy::Ping => {
-                            console::log_1(&"Substream::read_write2(): it's a ping!".into());
+                            // console::log_1(&"Substream::read_write2(): it's a ping!".into());
                             (
                                 Some(SubstreamInner::PingIn {
                                     payload_out: VecDeque::with_capacity(32),

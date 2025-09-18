@@ -114,10 +114,10 @@ impl WebRtcFraming {
                 .inner_stream_expected_incoming_bytes
                 .map_or(false, |rq_bytes| rq_bytes > 0 && rq_bytes <= self.receive_buffer.len())
             {
-                console::log_1(&format!(
-                    "WebRtcFraming::read_write(): self.receive_buffer.len(): {}",
-                    self.receive_buffer.len(),
-                ).into());
+                // console::log_1(&format!(
+                //     "WebRtcFraming::read_write(): self.receive_buffer.len(): {}",
+                //     self.receive_buffer.len(),
+                // ).into());
                 break;
             }
 
@@ -133,10 +133,10 @@ impl WebRtcFraming {
                 );
                 match nom::Parser::parse(&mut parser, &outer_read_write.incoming_buffer) {
                     Ok((rest, framed_message)) => {
-                        console::log_1(&format!(
-                            "WebRtcFraming::read_write(): framed_message.len(): {}",
-                            framed_message.message.map_or(0, |m| m.len()),
-                        ).into());
+                        // console::log_1(&format!(
+                        //     "WebRtcFraming::read_write(): framed_message.len(): {}",
+                        //     framed_message.message.map_or(0, |m| m.len()),
+                        // ).into());
 
                         // The remote has sent a `RESET_STREAM` flag, immediately stop with an error.
                         // The specification mentions that the receiver may discard any data already
@@ -176,10 +176,10 @@ impl WebRtcFraming {
 
                         // Copy the message of the remote out from the incoming buffer.
                         if let Some(message) = framed_message.message {
-                            console::log_1(&format!(
-                                "WebRtcFraming::read_write(): extracting {} bytes payload",
-                                message.len(),
-                            ).into());
+                            // console::log_1(&format!(
+                            //     "WebRtcFraming::read_write(): extracting {} bytes payload",
+                            //     message.len(),
+                            // ).into());
 
                             self.receive_buffer.extend_from_slice(message);
                         }

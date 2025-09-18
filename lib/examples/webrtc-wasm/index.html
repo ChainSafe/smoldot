@@ -66,7 +66,7 @@
     output.textContent += 'Running WebRTC demo...\n';
     const peer = document.getElementById('peerAddress').value;
 
-    await run_client(peer, sendTo).catch(error => {
+    await run_client(peer).catch(error => {
       output.textContent += `\n\n${error}\n`;
     });
   };
@@ -79,17 +79,17 @@
     const channel = channels[channelId];
 
     if (!channel) {
-      console.error(`JS: channel ${channelId} not found`);
-      return;
+      throw new Error(`JS: channel ${channelId} not found`);
     }
 
     if (channel.readyState !== 'open') {
-      console.error(`JS: channel ${channelId} is not in ready state`);
-      return;
+      throw new Error(`JS: channel ${channelId} is not in ready state`);
     }
 
     channel.send(data);
   }
+
+  globalThis.sendTo = sendTo;
 
   export async function generateCertificate() {
     return await RTCPeerConnection.generateCertificate({
@@ -126,14 +126,45 @@
   }
 
   globalThis.now = now;
-  
-  // glue should have the following method(s):
-  // onDatachannelOpen(channelId: Number): void;
-  // onDatachannelClose(channelId: Number): void;
-  // onDatachannelError(channelId: Number, msg: String): void;
-  // onMessage(channelId: Number, data: Uint8Array): void;
-  export async function dialWebRtcDirect(address, certificate, glue) {
+
+  globalThis.smoldotGlue = {
+    onDatachannelOpen: (channelId) => {
+      console.log(`JS: glue stub onDatachannelOpen() channelId: ${channelId}`);
+    },
+    onDatachannelClose: (channelId) => {
+      console.log(`JS: glue stub onDatachannelClose(): ${channelId}`);
+      delete channels[channelId];
+    },
+    onDatachannelError: (channelId, msg) => {
+      console.log(`JS: glue stub onDatachannelError(): channelId: ${channelId}, msg: ${msg}`);
+      delete channels[channelId];
+    },
+    onMessage: (channelId, _data) => {
+      console.log(`JS: glue stub onMessage(): channelId: ${channelId}`);
+    }
+  }
+
+  export function setGlue(glue) {
+    globalThis.smoldotGlue = glue;
+  }
+
+  globalThis.setGlue = setGlue;
+
+  export function createDatachannel() {
+    const dc = globalThis.rtcPeerConnection.createDataChannel('', {
+      ordered: true,
+    });
+
+    configureDatachannel(dc);
+
+    return dc.id;
+  }
+
+  globalThis.createDatachannel = createDatachannel;
+
+  export async function dialWebRtcDirect(address, certificate) {
     const pc = new RTCPeerConnection({certificates: [certificate], iceServers: []});
+    globalThis.rtcPeerConnection = pc;
 
     pc.ondatachannel = event => {
       console.log(`JS: datachannel event. channel id: ${event.channel.id}`);
@@ -142,19 +173,19 @@
       event.channel.onmessage = dataEvent => {
         const data = new Uint8Array(dataEvent.data);
         // console.log(`JS: ${data.length} bytes received on channel ${event.channel.id}: ${String(data)}`);
-        glue.onMessage(event.channel.id, data);
+        globalThis.smoldotGlue.onMessage(event.channel.id, data);
       };
 
       event.channel.onclose = () => {
-        glue.onDatachannelClose(event.channel.id);
+        globalThis.smoldotGlue.onDatachannelClose(event.channel.id);
       }
 
       event.channel.onerror = err => {
         const msg = `${err}`;
-        glue.onDatachannelError(event.channel.id, msg);
+        globalThis.smoldotGlue.onDatachannelError(event.channel.id, msg);
       }
 
-      glue.onDatachannelOpen(event.channel.id);
+      globalThis.smoldotGlue.onDatachannelOpen(event.channel.id);
     };
 
     const dc = pc.createDataChannel('', {
@@ -163,22 +194,7 @@
       ordered: true,
     });
 
-    channels[dc.id] = dc;
-    dc.binaryType = 'arraybuffer';
-    dc.onmessage = event => {
-      const data = new Uint8Array(event.data);
-      // console.log(`JS: ${data.length} bytes received on channel ${dc.id}`); //: ${data}`);
-      glue.onMessage(dc.id, data);
-    };
-
-    dc.onclose = () => {
-      glue.onDatachannelClose(dc.id);
-    }
-
-    dc.onerror = err => {
-      const msg = `${err}`;
-      glue.onDatachannelError(dc.id, msg);
-    }
+    configureDatachannel(dc);
 
     // Build answer and offer with patched ICE ufrag/pwd with libp2p tag
     const ufrag = `libp2p+webrtc+v1/${randomString()}`;
@@ -199,6 +215,28 @@
   }
 
   globalThis.dialWebRtcDirect = dialWebRtcDirect;
+
+  function configureDatachannel(dc) {
+    channels[dc.id] = dc;
+    dc.binaryType = 'arraybuffer';
+
+    dc.onmessage = event => {
+      const data = new Uint8Array(event.data);
+      // console.log(`JS: ${data.length} bytes received on channel ${dc.id}`); //: ${data}`);
+      globalThis.smoldotGlue.onMessage(dc.id, data);
+    };
+
+    dc.onclose = () => {
+      globalThis.smoldotGlue.onDatachannelClose(dc.id);
+      delete channels[channelId];
+    }
+
+    dc.onerror = err => {
+      const msg = `${err}`;
+      globalThis.smoldotGlue.onDatachannelError(dc.id, msg);
+      delete channels[channelId];
+    }
+  }
 
   function buildAnswer(ip, port, certhash, ufrag) {
     // Single host candidate, ICE-lite, DTLS passive, SCTP port 5000, max message size 16KiB.

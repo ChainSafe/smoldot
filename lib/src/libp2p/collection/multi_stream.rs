@@ -970,9 +970,6 @@ where
                 .as_ref()
                 .map_or(false, |s| s == substream_id) =>
             {
-                #[cfg(target_arch = "wasm32")]
-                console::log_1(&"MultiStreamConnectionTask::substream_read_write(): first MultiStreamConnectionTaskInner::Established matched".into());
-
                 // Close the writing side. If the reading side is closed, we indicate that the
                 // substream is dead. If the reading side is still open, we indicate that it's not
                 // dead and simply wait for the remote to close it.
@@ -986,11 +983,10 @@ where
                 }
             }
             MultiStreamConnectionTaskInner::Established { established, .. } => {
-                #[cfg(target_arch = "wasm32")]
-                console::log_1(&format!(
-                    "MultiStreamConnectionTask::substream_read_write(): second MultiStreamConnectionTaskInner::Established matched. read_write.incoming_buffer.len(): {}",
-                    read_write.incoming_buffer.len(),
-                ).into());
+                // console::log_1(&format!(
+                //     "MultiStreamConnectionTask::substream_read_write(): second MultiStreamConnectionTaskInner::Established matched. read_write.incoming_buffer.len(): {}",
+                //     read_write.incoming_buffer.len(),
+                // ).into());
                 established.substream_read_write(substream_id, read_write)
             }
             MultiStreamConnectionTaskInner::Handshake {
