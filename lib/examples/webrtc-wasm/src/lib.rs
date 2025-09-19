@@ -1,8 +1,9 @@
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::rc::Rc;
-
+use std::time::Duration;
 use smoldot::libp2p::{
     PeerId, collection,
     connection::{noise, webrtc_framing},
@@ -38,7 +39,7 @@ extern "C" {
 }
 
 #[wasm_bindgen]
-pub async fn run_client(peer_address: String) -> Result<String, String> {
+pub async fn run_client(peer_address: String) -> Result<(), String> {
     console::log_1(&format!("dialing: {}", peer_address).into());
 
     let mut client = Client::new(peer_address)
@@ -50,7 +51,7 @@ pub async fn run_client(peer_address: String) -> Result<String, String> {
         .await
         .map_err(|e| format!("client run() error: {:?}", e))?;
 
-    Ok("doin' the ting...".to_owned())
+    Ok(())
 }
 
 type DatachannelId = u64;
@@ -65,24 +66,30 @@ impl Instant {
     }
 }
 
-impl core::ops::Add<std::time::Duration> for Instant {
+impl Display for Instant {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl core::ops::Add<Duration> for Instant {
     type Output = Self;
-    fn add(self, rhs: std::time::Duration) -> Self::Output {
+    fn add(self, rhs: Duration) -> Self::Output {
         Self(self.0.saturating_add(rhs.as_millis() as u64))
     }
 }
 
-impl core::ops::Sub<std::time::Duration> for Instant {
+impl core::ops::Sub<Duration> for Instant {
     type Output = Self;
-    fn sub(self, rhs: std::time::Duration) -> Self::Output {
+    fn sub(self, rhs: Duration) -> Self::Output {
         Self(self.0.saturating_sub(rhs.as_millis() as u64))
     }
 }
 
 impl core::ops::Sub for Instant {
-    type Output = std::time::Duration;
+    type Output = Duration;
     fn sub(self, rhs: Self) -> Self::Output {
-        std::time::Duration::from_millis(self.0.saturating_sub(rhs.0))
+        Duration::from_millis(self.0.saturating_sub(rhs.0))
     }
 }
 
@@ -104,7 +111,7 @@ impl Client {
             capacity: 4,
             max_inbound_substreams: 8,
             max_protocol_name_len: 64,
-            handshake_timeout: std::time::Duration::from_secs(10),
+            handshake_timeout: Duration::from_secs(10),
             ping_protocol: "/ipfs/ping/1.0.0".to_string(),
         };
 
@@ -139,7 +146,6 @@ impl Client {
                 task: None,
                 connection_id: None,
                 buffers: HashMap::new(),
-                handshake_done: false,
             })),
         })
     }
@@ -147,7 +153,7 @@ impl Client {
     async fn run(&mut self) -> Result<(), String> {
         let glue = js_sys::Object::new();
 
-        // onDatachannelOpen()
+        // onDatachannelOpen(channelId: Number)
         {
             let inner_rc = Rc::clone(&self.inner);
 
@@ -162,11 +168,30 @@ impl Client {
                 &JsValue::from_str("onDatachannelOpen"),
                 func.as_ref().unchecked_ref(),
             )
-            .unwrap();
+                .unwrap();
             func.forget();
         }
 
-        // onDatachannelClose()
+        // onDatachannelReady(channelId: Number)
+        {
+            let inner_rc = Rc::clone(&self.inner);
+
+            let func =
+                Closure::<dyn FnMut(js_sys::Number)>::new(move |channel_id: js_sys::Number| {
+                    let channel_id = channel_id.as_f64().unwrap() as DatachannelId;
+                    let mut this = inner_rc.borrow_mut();
+                    this.on_datachannel_ready(channel_id);
+                });
+            js_sys::Reflect::set(
+                glue.as_ref(),
+                &JsValue::from_str("onDatachannelReady"),
+                func.as_ref().unchecked_ref(),
+            )
+                .unwrap();
+            func.forget();
+        }
+
+        // onDatachannelClose(channelId: Number)
         {
             let inner_rc = Rc::clone(&self.inner);
 
@@ -181,11 +206,11 @@ impl Client {
                 &JsValue::from_str("onDatachannelClose"),
                 func.as_ref().unchecked_ref(),
             )
-            .unwrap();
+                .unwrap();
             func.forget();
         }
 
-        // onDatachannelError()
+        // onDatachannelError(channelId: Number, message: String)
         {
             let inner_rc = Rc::clone(&self.inner);
 
@@ -201,11 +226,11 @@ impl Client {
                 &JsValue::from_str("onDatachannelError"),
                 func.as_ref().unchecked_ref(),
             )
-            .unwrap();
+                .unwrap();
             func.forget();
         }
 
-        // onMessage()
+        // onMessage(channelId: Number, data: Uint8Array)
         {
             let inner_rc = Rc::clone(&self.inner);
 
@@ -222,25 +247,36 @@ impl Client {
                 &JsValue::from_str("onMessage"),
                 func.as_ref().unchecked_ref(),
             )
-            .unwrap();
+                .unwrap();
+            func.forget();
+        }
+
+        // onTimeElapsed(now: Number)
+        {
+            let inner_rc = Rc::clone(&self.inner);
+
+            let func =
+                Closure::<dyn FnMut(js_sys::Number)>::new(move |now: js_sys::Number| {
+                    let now = Instant(now.as_f64().unwrap() as u64);
+                    let mut this = inner_rc.borrow_mut();
+                    this.on_time_elapsed(now);
+                });
+            js_sys::Reflect::set(
+                glue.as_ref(),
+                &JsValue::from_str("onTimeElapsed"),
+                func.as_ref().unchecked_ref(),
+            )
+                .unwrap();
             func.forget();
         }
 
         setGlue(glue);
 
-        let (peer_address, local_cert) = {
-            let this = self.inner.borrow();
-            (this.peer_address.clone(), this.local_cert.clone())
-        };
-
-        dialWebRtcDirect(peer_address, local_cert)
-            .await
-            .map_err(|e| format!("dial error: {:?}", e))?;
-
+        // This is put in a scope so that `inner` is not "held across an await point".
         {
             let mut inner = self.inner.borrow_mut();
             let (connection_id, mut task) = inner.network.insert_multi_stream(
-                Instant(0),
+                Instant::now(),
                 collection::MultiStreamHandshakeKind::WebRtc {
                     is_initiator: true,
                     noise_key: &self.noise_key,
@@ -251,10 +287,6 @@ impl Client {
                 None,
             );
 
-            // on_message() inserts a ReadWrite if none exists for a channel. We add one for channel
-            // 0 here so that we can refuse to handle any more messages on channel 0 after the
-            // handshake. This is done by removing the ReadWrite from the map in on_message() when
-            // handshake completion is detected.
             inner.buffers.insert(0, empty_read_write());
 
             task.add_substream(0, true);
@@ -267,6 +299,16 @@ impl Client {
             inner.task = task_update;
             inner.connection_id = Some(connection_id);
         }
+
+        let (peer_address, local_cert) = {
+            let this = self.inner.borrow();
+            (this.peer_address.clone(), this.local_cert.clone())
+        };
+
+        dialWebRtcDirect(peer_address, local_cert)
+            .await
+            .map_err(|e| format!("dial error: {:?}", e))?;
+
         Ok(())
     }
 }
@@ -278,7 +320,6 @@ struct ClientInner {
     task: Option<collection::MultiStreamConnectionTask<Instant, DatachannelId>>,
     connection_id: Option<ConnectionId>,
     buffers: HashMap<DatachannelId, ReadWrite<Instant>>,
-    handshake_done: bool,
 }
 
 impl ClientInner {
@@ -286,49 +327,41 @@ impl ClientInner {
     fn on_datachannel_open(&mut self, channel_id: DatachannelId) {
         // console::log_1(&format!("data channel {channel_id} opened").into());
 
-        match &mut self.task {
-            Some(task) => {
-                task.add_substream(channel_id, false);
+        if self.task.is_none() {
+            console::log_1(&format!(
+                "ClientInner::on_data_channel_open(channel_id={channel_id}): no task, bailing out"
+            ).into());
+            return;
+        }
 
-                let subs_wanted = task.desired_outbound_substreams();
-                if subs_wanted > 0 {
+        self.buffers.insert(channel_id, empty_read_write());
+
+        let task = self.task.as_mut().unwrap();
+        task.add_substream(channel_id, false);
+
+        for _ in 0..task.desired_outbound_substreams() {
+            match createDatachannel() {
+                Ok(n) => {
+                    let sub_id = n.as_f64().unwrap() as DatachannelId;
+                    task.add_substream(sub_id, true);
+
+                    let rw = self
+                        .buffers
+                        .entry(sub_id)
+                        .or_insert_with(empty_read_write);
+
+                    // Docs say we should call task.desired_outbound_substreams() after
+                    // calling task.substream_read_write().
+                    // Instead of doing it here, we do it in on_datachannel_ready().
+                    let _ /* FIXME */ = task.substream_read_write(&sub_id, rw);
+                },
+                Err(err) => {
                     console::log_1(&format!(
-                        "ClientInner::on_data_channel_open(channel_id={channel_id}): desired outbound substreams {subs_wanted} after task.add_substream()"
+                        "ClientInner::on_data_channel_open(channel_id={channel_id}): createDatachannel() failed: {err:?}"
                     ).into());
-
-                    // for _ in 0..subs_wanted {
-                    //     match createDatachannel() {
-                    //         Ok(n) => {
-                    //             let sub_id = n.as_f64().unwrap() as DatachannelId;
-                    //             task.add_substream(sub_id, true);
-                    //
-                    //             let mut rw = empty_read_write();
-                    //             let _ /* FIXME */ = task.substream_read_write(&sub_id, &mut rw);
-                    //
-                    //             // TODO are we really supposed to call this again?
-                    //             let subs_wanted = task.desired_outbound_substreams();
-                    //             if subs_wanted > 0 {
-                    //                 console::log_1(&format!(
-                    //                     "ClientInner::on_data_channel_open(channel_id={channel_id}): desired outbound substreams {subs_wanted} after *second* task.add_substream()"
-                    //                 ).into());
-                    //             }
-                    //         },
-                    //         Err(err) => {
-                    //             console::log_1(&format!(
-                    //                 "ClientInner::on_data_channel_open(channel_id={channel_id}): createDatachannel() failed: {err:?}"
-                    //             ).into());
-                    //         }
-                    //     };
-                    // }
                 }
-            },
-            None => {
-                console::log_1(&format!(
-                    "ClientInner::on_data_channel_open(channel_id={channel_id}): no task, bailing out"
-                ).into());
-                return;
-            }
-        };
+            };
+        }
 
         self.task = loop {
             let task = match self.task.take() {
@@ -347,9 +380,9 @@ impl ClientInner {
 
             let mut task = match task.pull_message_to_coordinator() {
                 (Some(task), Some(msg)) => {
-                        console::log_1( & format!(
-                        "ClientInner::on_datachannel_open(channel_id={channel_id}): got a msg for coordinator from task"
-                        ).into());
+                        // console::log_1( & format!(
+                        // "ClientInner::on_datachannel_open(channel_id={channel_id}): got a msg for coordinator from task"
+                        // ).into());
                         self.network.inject_connection_message( self.connection_id.unwrap(), msg);
                         task
                 },
@@ -358,7 +391,7 @@ impl ClientInner {
                     task
                 },
                 (None, _) => {
-                    console::log_1( & format ! (
+                    console::log_1(&format!(
                         "ClientInner::on_data_channel_open(channel_id={channel_id}): task consumed itself in pull_messages_to_coordinator() 🤷"
                     ).into());
                     return;
@@ -367,23 +400,43 @@ impl ClientInner {
 
             match self.network.next_event() {
                 Some(collection::Event::HandshakeFinished { id, peer_id }) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_datachannel_open(channel_id={channel_id}): handshake on connection {id:?} finished! peer ID: {peer_id}",
-                    ).into());
+                    // console::log_1(&format!(
+                    //     "ClientInner::on_datachannel_open(channel_id={channel_id}): handshake on connection {id:?} finished! peer ID: {peer_id}",
+                    // ).into());
                 }
                 Some(collection::Event::InboundNegotiated {
                     protocol_name,
                     substream_id,
                     ..
                 }) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_datachannel_open(channel_id={channel_id}): inbound negotiated protocol {protocol_name}",
-                    ).into());
+                    // console::log_1(&format!(
+                    //     "ClientInner::on_datachannel_open(channel_id={channel_id}): inbound negotiated protocol {protocol_name}",
+                    // ).into());
                     if protocol_name == "/ipfs/ping/1.0.0" {
                         self.network.accept_inbound(substream_id, collection::InboundTy::Ping);
                     } else {
                         self.network.reject_inbound(substream_id);
                     }
+                }
+                Some(collection::Event::InboundError{ id, error }) => {
+                    console::log_1(&format!(
+                        "ClientInner::on_datachannel_open(channel_id={channel_id}): inbound error on connection {id:?}: {error:?}",
+                    ).into());
+                }
+                Some(collection::Event::PingOutSuccess{ id, ping_time }) => {
+                    console::log_1(&format!(
+                        "ClientInner::on_datachannel_open(channel_id={channel_id}): outbound ping on connection {id:?} succeeded. RTT: {ping_time:?}",
+                    ).into());
+                }
+                Some(collection::Event::PingOutFailed{ id }) => {
+                    console::log_1(&format!(
+                        "ClientInner::on_datachannel_open(channel_id={channel_id}): outbound ping on connection {id:?} failed",
+                    ).into());
+                }
+                Some(collection::Event::NotificationsInOpen { substream_id, .. }) => {
+                    console::log_1(&format!(
+                        "ClientInner::on_datachannel_open(channel_id={channel_id}): remote wants to open notifications substream {substream_id:?}",
+                    ).into());
                 }
                 None => {
                     got_network_event = false;
@@ -411,14 +464,24 @@ impl ClientInner {
             }
 
             if !got_coordinator_msg && !got_connection_msg && !got_network_event {
-                console::log_1(&format!(
-                    "ClientInner::on_datachannel_open(channel_id={channel_id}): no messages or events left"
-                ).into());
+                // console::log_1(&format!(
+                //     "ClientInner::on_datachannel_open(channel_id={channel_id}): no messages or events left"
+                // ).into());
                 break Some(task);
             }
 
             self.task = Some(task);
         }
+    }
+
+    fn on_datachannel_ready(&mut self, channel_id: DatachannelId) {
+        let rw = self
+            .buffers
+            .entry(channel_id)
+            .or_insert_with(empty_read_write);
+
+        rw.now = Instant::now();
+        send(channel_id, rw.write_buffers.as_mut());
     }
 
     fn on_datachannel_close(&mut self, channel_id: DatachannelId) {
@@ -438,31 +501,26 @@ impl ClientInner {
     }
 
     fn on_message(&mut self, channel_id: DatachannelId, data: &[u8]) {
-        console::log_1(
-            &format!(
-                "ClientInner::on_message(channel_id={channel_id}): {} bytes received",
-                data.len()
-            )
-            .into(),
-        );
+        // console::log_1(
+        //     &format!(
+        //         "ClientInner::on_message(channel_id={channel_id}): {} bytes received",
+        //         data.len()
+        //     )
+        //     .into(),
+        // );
 
-        if channel_id == 0 && self.handshake_done {
-            // console::log_1(
-            //     &"ClientInner::on_message(): not touching channel 0 again after handshake".into(),
-            // );
+        if !self.buffers.contains_key(&channel_id) {
+            // console::log_1(&format!(
+            //     "ClientInner::on_message(channel_id={channel_id}): no buffer, bailing out"
+            // ).into());
             return;
         }
 
-        let mut is_ping = channel_id != 0 && data.len() == 35; // HACK HACK HACK 🚨
-
-        // let mut rw = make_read_write_with(data);
-        let rw = self
-            .buffers
-            .entry(channel_id)
-            .or_insert_with(empty_read_write);
-
+        let rw = self.buffers.get_mut(&channel_id).unwrap();
         rw.incoming_buffer.extend_from_slice(data);
         rw.now = Instant::now();
+
+        let mut remove_channel = false;
 
         self.task = loop {
             let mut task = match self.task.take() {
@@ -479,13 +537,11 @@ impl ClientInner {
                 task.substream_read_write(&channel_id, rw),
                 collection::SubstreamFate::Reset,
             ) {
-                console::log_1(&format!(
-                    "ClientInner::on_message(channel_id={channel_id}): channel has been reset"
-                ).into());
-                self.handshake_done = channel_id == 0; // HACK HACK HACK 🚨
-                // self.buffers.remove(&channel_id); // FIXME
-                self.task = Some(task);
-                return;
+                // console::log_1(&format!(
+                //     "ClientInner::on_message(channel_id={channel_id}): channel has been reset"
+                // ).into());
+                remove_channel = true;
+                break Some(task);
             }
 
             let mut got_coordinator_msg = true;
@@ -505,7 +561,7 @@ impl ClientInner {
                     console::log_1(&format!(
                         "ClientInner::on_message(channel_id={channel_id}): task consumed itself in pull_message_to_coordinator() 🤷"
                     ).into());
-                    return;
+                    break None;
                 }
             };
 
@@ -529,6 +585,26 @@ impl ClientInner {
                         self.network.reject_inbound(substream_id);
                     }
                 }
+                Some(collection::Event::InboundError{ id, error }) => {
+                    console::log_1(&format!(
+                        "ClientInner::on_message(channel_id={channel_id}): inbound error on connection {id:?}: {error:?}",
+                    ).into());
+                }
+                Some(collection::Event::PingOutSuccess{ id, ping_time }) => {
+                    console::log_1(&format!(
+                        "ClientInner::on_message(channel_id={channel_id}): outbound ping on connection {id:?} succeeded. RTT: {ping_time:?}",
+                    ).into());
+                }
+                Some(collection::Event::PingOutFailed{ id }) => {
+                    console::log_1(&format!(
+                        "ClientInner::on_message(channel_id={channel_id}): outbound ping on connection {id:?} failed",
+                    ).into());
+                }
+                Some(collection::Event::NotificationsInOpen { substream_id, .. }) => {
+                    console::log_1(&format!(
+                        "ClientInner::on_message(channel_id={channel_id}): remote wants to open notifications substream {substream_id:?}",
+                    ).into());
+                }
                 None => {
                     got_network_event = false;
                 }
@@ -541,40 +617,16 @@ impl ClientInner {
 
             match self.network.pull_message_to_connection() {
                 Some((_, msg)) => {
-                    let now = Instant::now();
-                    task.inject_coordinator_message(&now, msg);
+                    task.inject_coordinator_message(&Instant::now(), msg);
 
-                    let subs_wanted = task.desired_outbound_substreams();
-                    if subs_wanted > 0 {
-                        console::log_1(&format!(
-                            "ClientInner::on_message(channel_id={channel_id}): desired outbound substreams {subs_wanted} after task.inject_coordinator_message()"
-                        ).into());
-                    }
+                    // let subs_wanted = task.desired_outbound_substreams();
+                    // if subs_wanted > 0 {
+                    //     console::log_1(&format!(
+                    //         "ClientInner::on_message(channel_id={channel_id}): desired outbound substreams {subs_wanted} after task.inject_coordinator_message()"
+                    //     ).into());
+                    // }
                 }
                 None => got_connection_msg = false
-            }
-
-            // HACK HACK HACK 🚨
-            if is_ping {
-                if matches!(
-                    task.substream_read_write(&channel_id, rw),
-                    collection::SubstreamFate::Reset,
-                ) {
-                    console::log_1(&format!(
-                        "ClientInner::on_message(channel_id={channel_id}): channel has been reset during ping bonus round"
-                    ).into());
-                    // self.buffers.remove(&channel_id); // FIXME
-                    self.task = Some(task);
-                    return;
-                }
-                is_ping = false;
-
-                let subs_wanted = task.desired_outbound_substreams();
-                if subs_wanted > 0 {
-                    console::log_1(&format!(
-                        "ClientInner::on_message(channel_id={channel_id}): desired outbound substreams {subs_wanted} after task.substream_read_write()"
-                    ).into());
-                }
             }
 
             if !got_coordinator_msg && !got_connection_msg && !got_network_event {
@@ -587,38 +639,60 @@ impl ClientInner {
             self.task = Some(task);
         };
 
-        let mut total = 0;
+        if remove_channel {
+            self.buffers.remove(&channel_id);
+        } else {
+            send(channel_id, rw.write_buffers.as_mut());
+        }
+    }
 
-        // let mut all_the_bytes = Vec::new();
-
-        for chunk in rw.write_buffers.drain(..) {
-            // TODO: figure out how this happens and why sending 0 bytes breaks pings 🤪
-            if chunk.is_empty() {
-                // console::log_1(&format!(
-                //     "ClientInner::on_message(channel_id={channel_id}): empty chunk in write_buffers, skipping"
-                // ).into());
-                continue;
-            }
-            send(channel_id, &chunk);
-            // all_the_bytes.extend_from_slice(&chunk);
-            total += chunk.len();
+    fn on_time_elapsed(&mut self, now: Instant) {
+        if self.task.is_none() {
+            return;
         }
 
-        // if total > 0 {
-        //     console::log_1(&format!(
-        //         "ClientInner::on_message(channel_id={channel_id}): sent {total} bytes" //: {all_the_bytes:?}"
-        //     ).into());
-        // }
+        let task = &mut self.task.as_mut().unwrap();
+        let mut reset_channels = Vec::new();
+
+        for (channel_id, rw) in self.buffers.iter_mut() {
+            if rw.wake_up_after.map_or(true, |wua| now < wua) {
+                continue;
+            }
+
+            rw.now = now;
+            rw.wake_up_after = None;
+
+            if matches!(
+                task.substream_read_write(channel_id, rw),
+                collection::SubstreamFate::Reset,
+            ) {
+                console::log_1(&format!(
+                    "ClientInner::on_time_elapsed(): channel {channel_id} has been reset during wakeup"
+                ).into());
+                reset_channels.push(*channel_id);
+                continue;
+            }
+
+            send(*channel_id, rw.write_buffers.as_mut());
+        }
+
+        reset_channels.iter().for_each(|channel_id| { self.buffers.remove(channel_id); });
     }
 }
 
-fn send(channel_id: u64, data: &[u8]) {
-    if let Err(e) = sendTo(channel_id, data) {
-        console::error_1(&format!(
-            "sending {} bytes to channel {channel_id} failed: {e:?}",
-            data.len(),
-        ).into());
-    }
+fn send(channel_id: DatachannelId, write_buffers: &mut Vec<Vec<u8>>) {
+    write_buffers
+        .drain(..)
+        .filter(|chunk| !chunk.is_empty())
+        .for_each(|chunk| {
+            if let Err(e) = sendTo(channel_id, &chunk) {
+                console::error_1(&format!(
+                    "sending {} bytes to channel {channel_id} failed: {e:?}",
+                    chunk.len(),
+                ).into());
+            }
+        }
+    );
 }
 
 fn empty_read_write() -> ReadWrite<Instant> {
@@ -634,195 +708,8 @@ fn empty_read_write() -> ReadWrite<Instant> {
     }
 }
 
-fn make_read_write_with(data: &[u8]) -> ReadWrite<Instant> {
-    ReadWrite {
-        now: Instant::now(),
-        incoming_buffer: Vec::from(data),
-        expected_incoming_bytes: Some(0),
-        read_bytes: 0,
-        write_buffers: Vec::new(),
-        write_bytes_queued: 0,
-        write_bytes_queueable: Some(128 * 1024),
-        wake_up_after: None,
-    }
-}
-
-// step 1: build the noise prologue
-// build the noise prologue for libp2p WebRTC.
-// In the WebRTC handshake, the Noise prologue must be set to `"libp2p-webrtc-noise:"`
-// followed with the multihash-encoded fingerprints of the initiator's certificate
-// and the receiver's certificate.
-fn build_webrtc_noise_prologue(local_mh: &[u8], remote_mh: &[u8]) -> Vec<u8> {
-    const PREFIX: &[u8] = b"libp2p-webrtc-noise:";
-    let mut out = Vec::with_capacity(PREFIX.len() + local_mh.len() + remote_mh.len());
-    out.extend_from_slice(PREFIX);
-    out.extend_from_slice(local_mh);
-    out.extend_from_slice(remote_mh);
-    out
-}
-
-// libp2p webrtc requires a multihash of a TLS certificate SHA-256 fingerprint
-fn cert_sha256_to_multihash_helper(cert_sha256: &[u8; 32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(34);
-    out.extend_from_slice(&[0x12, 32]); // sha2-256 multihash header
-    out.extend_from_slice(cert_sha256);
-    out
-}
-
-// step 2: build the noise key
 fn build_noise_key(ed25519_private: &[u8; 32], noise_static_private: &[u8; 32]) -> noise::NoiseKey {
     noise::NoiseKey::new(ed25519_private, noise_static_private)
-}
-
-// step 3: Initialize WebRTC framing and Noise handshake
-// libp2p WebRTC framing + Noise handshakes
-pub struct WebRtcHandshaker {
-    framing: webrtc_framing::WebRtcFraming,
-    hs: Option<noise::HandshakeInProgress>,
-    pub remote_peer_id: Option<PeerId>,
-    pub cipher: Option<noise::Noise>,
-}
-
-impl WebRtcHandshaker {
-    pub fn new(
-        local_cert_sha256: [u8; 32],
-        remote_cert_sha256: [u8; 32],
-        noise_key: &noise::NoiseKey,
-        ephemeral_secret: [u8; 32],
-    ) -> Self {
-        let local_mh = cert_sha256_to_multihash_helper(&local_cert_sha256);
-        let remote_mh = cert_sha256_to_multihash_helper(&remote_cert_sha256);
-        let prologue = build_webrtc_noise_prologue(&local_mh, &remote_mh);
-        let hs = noise::HandshakeInProgress::new(noise::Config {
-            key: noise_key,
-            is_initiator: false, // answerer = Noise initiator
-            prologue: &prologue,
-            ephemeral_secret_key: &ephemeral_secret,
-        });
-        WebRtcHandshaker {
-            framing: webrtc_framing::WebRtcFraming::new(),
-            hs: Some(hs),
-            remote_peer_id: None,
-            cipher: None,
-        }
-    }
-
-    pub fn new_with_random_keys(local_cert_sha256: [u8; 32], remote_cert_sha256: [u8; 32]) -> Self {
-        let mut rng = StdRng::seed_from_u64(0xC0FFEE);
-        let ed25519_private = {
-            let mut x = [0u8; 32];
-            rng.fill_bytes(&mut x);
-            x
-        };
-        let noise_static_private = {
-            let mut x = [0u8; 32];
-            rng.fill_bytes(&mut x);
-            x
-        };
-        let noise_key = build_noise_key(&ed25519_private, &noise_static_private);
-        let ephemeral_secret = {
-            let mut x = [0u8; 32];
-            rng.fill_bytes(&mut x);
-            x
-        };
-
-        Self::new(
-            local_cert_sha256,
-            remote_cert_sha256,
-            &noise_key,
-            ephemeral_secret,
-        )
-    }
-
-    // step 4: drive the handshaker over the DataChannel message flow
-    // 1. extract message from framing
-    // 2. feed message to the handshaker
-    // 3. return true if handshaker finished, false otherwise
-    pub fn drive_once<TNow: Clone>(
-        &mut self,
-        rw: &mut ReadWrite<TNow>,
-    ) -> Result<bool, noise::HandshakeError> {
-        let mut inner = self
-            .framing
-            .read_write(rw)
-            .map_err(|_| noise::HandshakeError::WriteClosed)?;
-
-        if let Some(hs) = self.hs.take() {
-            match hs.read_write(&mut inner)? {
-                // On success, get the negotiated libp2p PeerId and a Noise cipher for post‑handshake traffic
-                // smoldot does this before upgrading to multiplexing
-                noise::NoiseHandshake::InProgress(next) => {
-                    self.hs = Some(next);
-                    Ok(false)
-                }
-                noise::NoiseHandshake::Success {
-                    cipher,
-                    remote_peer_id,
-                } => {
-                    self.cipher = Some(cipher);
-                    self.remote_peer_id = Some(remote_peer_id);
-                    Ok(true)
-                }
-            }
-        } else {
-            Ok(true)
-        }
-    }
-
-    pub fn is_finished(&self) -> bool {
-        self.cipher.is_some()
-    }
-}
-
-// step 5: wire the handshaker to the DataChannel
-// Returns the negotiated PeerId on success.
-pub fn handshake_with_webrtc_dc(
-    local_cert_sha256: [u8; 32],
-    remote_cert_sha256: [u8; 32],
-    noise_key: &noise::NoiseKey,
-    ephemeral_secret: [u8; 32],
-    mut recv: impl FnMut() -> Option<Vec<u8>>,
-    mut send: impl FnMut(&[u8]),
-) -> Result<PeerId, noise::HandshakeError> {
-    let mut handshaker = WebRtcHandshaker::new(
-        local_cert_sha256,
-        remote_cert_sha256,
-        noise_key,
-        ephemeral_secret,
-    );
-
-    let mut rw = ReadWrite {
-        now: 0u64, // this is for WASM compatibility
-        incoming_buffer: Vec::new(),
-        expected_incoming_bytes: Some(0),
-        read_bytes: 0,
-        write_buffers: Vec::new(),
-        write_bytes_queued: 0,
-        write_bytes_queueable: Some(128 * 1024),
-        wake_up_after: None,
-    };
-
-    loop {
-        if let Some(mut msg) = recv() {
-            rw.incoming_buffer.append(&mut msg);
-        }
-
-        let finished = handshaker.drive_once(&mut rw)?;
-
-        if !rw.write_buffers.is_empty() {
-            for buf in rw.write_buffers.drain(..) {
-                if !buf.is_empty() {
-                    send(&buf);
-                }
-            }
-            rw.write_bytes_queueable = Some(128 * 1024);
-            rw.write_bytes_queued = 0;
-        }
-
-        if finished {
-            return Ok(handshaker.remote_peer_id.unwrap());
-        }
-    }
 }
 
 fn parse_certhash_from_multiaddr(addr: &str) -> Result<Vec<u8>, String> {

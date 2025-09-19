@@ -74,7 +74,7 @@
   const channels = {}; // channelId -> DataChannel
 
   export function sendTo(channelId, data) {
-    // console.log(`JS: sending ${data.length} bytes to channel ${channelId}: ${String(data)}`);
+    //console.log(`JS: sending ${data.length} bytes to channel ${channelId}: ${String(data)}`);
 
     const channel = channels[channelId];
 
@@ -122,14 +122,19 @@
   globalThis.getCertificateMultihash = getCertificateMultihash;
 
   export function now() {
-    return Date.now();
+    return performance.now();
   }
 
   globalThis.now = now;
 
   globalThis.smoldotGlue = {
+    // datachannel has been opened by the remote
     onDatachannelOpen: (channelId) => {
       console.log(`JS: glue stub onDatachannelOpen() channelId: ${channelId}`);
+    },
+    // locally opened datachannel is ready for bizniz
+    onDatachannelReady: (channelId) => {
+      console.log(`JS: glue stub onDatachannelReady() channelId: ${channelId}`);
     },
     onDatachannelClose: (channelId) => {
       console.log(`JS: glue stub onDatachannelClose(): ${channelId}`);
@@ -141,6 +146,9 @@
     },
     onMessage: (channelId, _data) => {
       console.log(`JS: glue stub onMessage(): channelId: ${channelId}`);
+    },
+    onTimeElapsed: (now) => {
+      console.log(`JS: glue stub onTimeElapsed(): channelId: ${now}`);
     }
   }
 
@@ -155,6 +163,8 @@
       ordered: true,
     });
 
+    dc.onopen = event => globalThis.smoldotGlue.onDatachannelReady(event.target.id);
+
     configureDatachannel(dc);
 
     return dc.id;
@@ -167,7 +177,6 @@
     globalThis.rtcPeerConnection = pc;
 
     pc.ondatachannel = event => {
-      console.log(`JS: datachannel event. channel id: ${event.channel.id}`);
       channels[event.channel.id] = event.channel;
 
       event.channel.onmessage = dataEvent => {
@@ -210,6 +219,10 @@
 
     const {[CODE_IP4]: ip, [CODE_UDP]: port, [CODE_CERTHASH]: certhash} = componentsByCode;
     const answer = buildAnswer(ip, port, certhash, ufrag);
+
+    setInterval(() => {
+      globalThis.smoldotGlue.onTimeElapsed(now());
+    }, 100);
 
     await pc.setRemoteDescription(answer);
   }

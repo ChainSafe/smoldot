@@ -296,7 +296,7 @@ where
 
         // Reading/writing the ping substream is used to queue new outgoing pings.
         if Some(substream_id) == self.ping_substream.as_ref() {
-            console::log_1(&"established::MultiStream::substream_read_write(): it's the ping substream!".into());
+            // console::log_1(&"established::MultiStream::substream_read_write(): it's the ping substream!".into());
             if read_write.now >= self.next_ping {
                 let mut payload = [0u8; 32];
                 self.ping_payload_randomness.fill_bytes(&mut payload);
