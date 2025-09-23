@@ -358,9 +358,6 @@ impl<'a, TNow: Clone> Drop for InnerReadWrite<'a, TNow> {
                 self.framing.local_write_state = LocalWriteState::FinBuffered;
                 Some(0)
             } else if matches!(self.framing.remote_write_state, RemoteWriteState::Closed) {
-                // TODO: remove
-                #[cfg(target_arch = "wasm32")]
-                console::log_1(&"WebRtcFraming::drop: putting FIN_ACK in outer_read_write".into());
                 // `FIN_ACK`
                 self.framing.remote_write_state = RemoteWriteState::ClosedAckBuffered;
                 Some(3)

@@ -74,7 +74,7 @@
   const channels = {}; // channelId -> DataChannel
 
   export function sendTo(channelId, data) {
-    //console.log(`JS: sending ${data.length} bytes to channel ${channelId}: ${String(data)}`);
+    // console.log(`JS: sending ${data.length} byte(s) to channel ${channelId}: ${String(data)}`);
 
     const channel = channels[channelId];
 
@@ -137,7 +137,7 @@
       console.log(`JS: glue stub onDatachannelReady() channelId: ${channelId}`);
     },
     onDatachannelClose: (channelId) => {
-      console.log(`JS: glue stub onDatachannelClose(): ${channelId}`);
+      console.log(`JS: glue stub onDatachannelClose(): channelId: ${channelId}`);
       delete channels[channelId];
     },
     onDatachannelError: (channelId, msg) => {
@@ -147,8 +147,8 @@
     onMessage: (channelId, _data) => {
       console.log(`JS: glue stub onMessage(): channelId: ${channelId}`);
     },
-    onTimeElapsed: (now) => {
-      console.log(`JS: glue stub onTimeElapsed(): channelId: ${now}`);
+    onTimeElapsed: () => {
+      console.log(`JS: glue stub onTimeElapsed()`);
     }
   }
 
@@ -221,7 +221,7 @@
     const answer = buildAnswer(ip, port, certhash, ufrag);
 
     setInterval(() => {
-      globalThis.smoldotGlue.onTimeElapsed(now());
+      globalThis.smoldotGlue.onTimeElapsed();
     }, 100);
 
     await pc.setRemoteDescription(answer);

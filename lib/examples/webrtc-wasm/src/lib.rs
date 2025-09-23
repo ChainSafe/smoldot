@@ -1,3 +1,5 @@
+mod perf;
+
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -5,7 +7,7 @@ use std::fmt::{Display, Formatter};
 use std::rc::Rc;
 use std::time::Duration;
 use smoldot::libp2p::{
-    PeerId, collection,
+    collection,
     connection::{noise, webrtc_framing},
     read_write::ReadWrite,
 };
@@ -13,6 +15,7 @@ use smoldot::libp2p::{
 use smoldot::libp2p::collection::ConnectionId;
 use wasm_bindgen::prelude::*;
 use web_sys::console;
+use smoldot::libp2p::connection::webrtc_framing::Error;
 
 #[wasm_bindgen]
 extern "C" {
@@ -145,7 +148,13 @@ impl Client {
                 network,
                 task: None,
                 connection_id: None,
-                buffers: HashMap::new(),
+                handshake_channel: 0,
+                handshake_done: false,
+                handshake_rw: empty_read_write(),
+                perf_channel: None,
+                perf_rw: empty_read_write(),
+                perf_framing: webrtc_framing::WebRtcFraming::new(),
+                perf_stream: Some(perf::PerfStream::new()),
             })),
         })
     }
@@ -155,13 +164,9 @@ impl Client {
 
         // onDatachannelOpen(channelId: Number)
         {
-            let inner_rc = Rc::clone(&self.inner);
-
             let func =
-                Closure::<dyn FnMut(js_sys::Number)>::new(move |channel_id: js_sys::Number| {
-                    let channel_id = channel_id.as_f64().unwrap() as DatachannelId;
-                    let mut this = inner_rc.borrow_mut();
-                    this.on_datachannel_open(channel_id);
+                Closure::<dyn FnMut(js_sys::Number)>::new(move |_channel_id: js_sys::Number| {
+                    console::log_1(&"remote unexpectedly opened a substream. ignoring".into());
                 });
             js_sys::Reflect::set(
                 glue.as_ref(),
@@ -239,7 +244,16 @@ impl Client {
                     let channel_id = channel_id.as_f64().unwrap() as DatachannelId;
                     let data = data.to_vec();
                     let mut this = inner_rc.borrow_mut();
-                    this.on_message(channel_id, &data);
+
+                    if channel_id == this.handshake_channel && !this.handshake_done {
+                        this.drive_handshake(channel_id, &data);
+                    } else if this.perf_channel.is_some_and(|c| c == channel_id) {
+                        this.on_message(channel_id, &data);
+                    } else if !this.handshake_done {
+                        console::log_1(&format!(
+                            "got message on unknown channel {channel_id}. ignoring"
+                        ).into());
+                    }
                 },
             );
             js_sys::Reflect::set(
@@ -251,15 +265,13 @@ impl Client {
             func.forget();
         }
 
-        // onTimeElapsed(now: Number)
+        // onTimeElapsed()
         {
             let inner_rc = Rc::clone(&self.inner);
 
             let func =
-                Closure::<dyn FnMut(js_sys::Number)>::new(move |now: js_sys::Number| {
-                    let now = Instant(now.as_f64().unwrap() as u64);
-                    let mut this = inner_rc.borrow_mut();
-                    this.on_time_elapsed(now);
+                Closure::<dyn FnMut()>::new(move || {
+                    inner_rc.borrow_mut().on_time_elapsed();
                 });
             js_sys::Reflect::set(
                 glue.as_ref(),
@@ -287,16 +299,8 @@ impl Client {
                 None,
             );
 
-            inner.buffers.insert(0, empty_read_write());
-
-            task.add_substream(0, true);
-            let (task_update, msg) = task.pull_message_to_coordinator(); // TODO: call in a loop until msg is None
-            if let Some(msg) = msg {
-                console::log_1(&"Client::run(): got an msg for coordinator from task".into());
-                inner.network.inject_connection_message(connection_id, msg)
-            }
-
-            inner.task = task_update;
+            task.add_substream(inner.handshake_channel, true);
+            inner.task = Some(task);
             inner.connection_id = Some(connection_id);
         }
 
@@ -319,364 +323,225 @@ struct ClientInner {
     network: collection::Network<Option<String>, Instant>,
     task: Option<collection::MultiStreamConnectionTask<Instant, DatachannelId>>,
     connection_id: Option<ConnectionId>,
-    buffers: HashMap<DatachannelId, ReadWrite<Instant>>,
+    handshake_channel: DatachannelId,
+    handshake_done: bool,
+    handshake_rw: ReadWrite<Instant>,
+    perf_channel: Option<DatachannelId>,
+    perf_rw: ReadWrite<Instant>,
+    perf_framing: webrtc_framing::WebRtcFraming,
+    perf_stream: Option<perf::PerfStream>,
 }
 
 impl ClientInner {
-    // datachannel was opened by the remote
-    fn on_datachannel_open(&mut self, channel_id: DatachannelId) {
-        let Some(task) = self.task.as_mut() else { return; };
-        task.add_substream(channel_id, false);
-
-        self.buffers.insert(channel_id, empty_read_write());
-        self.open_substreams();
-
-        self.task = loop {
-            let task = match self.task.take() {
-                Some(task) => task,
-                None => {
-                    console::log_1(&format!(
-                        "ClientInner::on_data_channel_open(channel_id={channel_id}): task disappeared, bailing out"
-                    ).into());
-                    return;
-                }
-            };
-
-            let mut got_coordinator_msg = true;
-            let mut got_connection_msg = true;
-            let mut got_network_event = true;
-
-            let mut task = match task.pull_message_to_coordinator() {
-                (Some(task), Some(msg)) => {
-                        // console::log_1( & format!(
-                        // "ClientInner::on_datachannel_open(channel_id={channel_id}): got a msg for coordinator from task"
-                        // ).into());
-                        self.network.inject_connection_message( self.connection_id.unwrap(), msg);
-                        task
-                },
-                (Some(task), None) => {
-                    got_coordinator_msg = false;
-                    task
-                },
-                (None, _) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_data_channel_open(channel_id={channel_id}): task consumed itself in pull_messages_to_coordinator() 🤷"
-                    ).into());
-                    return;
-                }
-            };
-
-            match self.network.next_event() {
-                Some(collection::Event::HandshakeFinished { id, peer_id }) => {
-                    // console::log_1(&format!(
-                    //     "ClientInner::on_datachannel_open(channel_id={channel_id}): handshake on connection {id:?} finished! peer ID: {peer_id}",
-                    // ).into());
-                }
-                Some(collection::Event::InboundNegotiated {
-                    protocol_name,
-                    substream_id,
-                    ..
-                }) => {
-                    // console::log_1(&format!(
-                    //     "ClientInner::on_datachannel_open(channel_id={channel_id}): inbound negotiated protocol {protocol_name}",
-                    // ).into());
-                    if protocol_name == "/ipfs/ping/1.0.0" {
-                        self.network.accept_inbound(substream_id, collection::InboundTy::Ping);
-                    } else {
-                        self.network.reject_inbound(substream_id);
-                    }
-                }
-                Some(collection::Event::InboundError{ id, error }) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_datachannel_open(channel_id={channel_id}): inbound error on connection {id:?}: {error:?}",
-                    ).into());
-                }
-                Some(collection::Event::PingOutSuccess{ id, ping_time }) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_datachannel_open(channel_id={channel_id}): outbound ping on connection {id:?} succeeded. RTT: {ping_time:?}",
-                    ).into());
-                }
-                Some(collection::Event::PingOutFailed{ id }) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_datachannel_open(channel_id={channel_id}): outbound ping on connection {id:?} failed",
-                    ).into());
-                }
-                Some(collection::Event::NotificationsInOpen { substream_id, .. }) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_datachannel_open(channel_id={channel_id}): remote wants to open notifications substream {substream_id:?}",
-                    ).into());
-                }
-                None => {
-                    got_network_event = false;
-                }
-                _ => {
-                    console::log_1(&format!(
-                        "ClientInner::on_datachannel_open(channel_id={channel_id}): some other stuff happened, will keep pumping messages and events"
-                    ).into());
-                }
-            }
-
-            match self.network.pull_message_to_connection() {
-                Some((_, msg)) => {
-                    let now = Instant::now();
-                    task.inject_coordinator_message(&now, msg);
-                }
-                None => got_connection_msg = false
-            }
-
-            let subs_wanted = task.desired_outbound_substreams();
-            if subs_wanted > 0 {
-                console::log_1(&format!(
-                    "ClientInner::on_datachannel_open(channel_id={channel_id}): desired outbound substreams {subs_wanted} after task.inject_coordinator_message()"
-                ).into());
-            }
-
-            if !got_coordinator_msg && !got_connection_msg && !got_network_event {
-                // console::log_1(&format!(
-                //     "ClientInner::on_datachannel_open(channel_id={channel_id}): no messages or events left"
-                // ).into());
-                break Some(task);
-            }
-
-            self.task = Some(task);
-        }
-    }
-
     fn on_datachannel_ready(&mut self, channel_id: DatachannelId) {
-        let rw = self
-            .buffers
-            .entry(channel_id)
-            .or_insert_with(empty_read_write);
+        // perf channel should be the only one opened after handshake
+        self.perf_channel = Some(channel_id);
 
-        rw.now = Instant::now();
-        send(channel_id, rw.write_buffers.as_mut());
+        self.perf_rw.now = Instant::now();
+        self.perf_rw.wake_up_after = None;
+
+        match self.perf_framing.read_write(&mut self.perf_rw) {
+            Ok(mut framing) => {
+                let Some(stream) = self.perf_stream.take() else { return; };
+                self.perf_stream = stream.read_write(&mut framing);
+            }
+            Err(err) => {
+                if !matches!(err, Error::RemoteResetDesired) {
+                    console::log_1(&format!(
+                        "ClientInner::on_datachannel_ready(channel_id={channel_id}): framing error: {err:?}"
+                    ).into());
+                }
+                return;
+            }
+        } // on drop, `framing` adds the protobuf frame to `self.perf_rw.write_buffers`
+
+        send(channel_id, self.perf_rw.write_buffers.as_mut());
     }
 
     fn on_datachannel_close(&mut self, channel_id: DatachannelId) {
         console::log_1(&format!("data channel {channel_id} closed").into());
+
         let Some(task) = self.task.as_mut() else { return; };
-        task.reset_substream(&channel_id); // TODO pull msg for coordinator
-        self.buffers.remove(&channel_id);
+
+        if channel_id == self.handshake_channel {
+            task.reset_substream(&channel_id);
+        }
     }
 
     fn on_datachannel_error(&mut self, channel_id: DatachannelId, msg: js_sys::JsString) {
         console::log_1(&format!("data channel {channel_id} error: {msg}").into());
+
         let Some(task) = self.task.as_mut() else { return; };
-        task.reset_substream(&channel_id); // TODO pull msg for coordinator
-        self.buffers.remove(&channel_id);
+
+        if channel_id == self.handshake_channel {
+            task.reset_substream(&channel_id);
+        }
     }
 
     fn on_message(&mut self, channel_id: DatachannelId, data: &[u8]) {
-        // console::log_1(
-        //     &format!(
-        //         "ClientInner::on_message(channel_id={channel_id}): {} bytes received",
-        //         data.len()
-        //     )
-        //     .into(),
-        // );
+        console::log_1(&format!(
+            "ClientInner::on_message(channel_id={channel_id}): got {} bytes",
+            data.len(),
+        ).into());
 
-        if !self.buffers.contains_key(&channel_id) {
-            // console::log_1(&format!(
-            //     "ClientInner::on_message(channel_id={channel_id}): no buffer, bailing out"
-            // ).into());
-            return;
+        let rw = &mut self.perf_rw;
+        rw.now = Instant::now();
+        rw.wake_up_after = None;
+        rw.incoming_buffer.extend_from_slice(data);
+
+        match self.perf_framing.read_write(rw) {
+            Ok(mut framing) => {
+                let Some(stream) = self.perf_stream.take() else { return; };
+                self.perf_stream = stream.read_write(&mut framing);
+            }
+            Err(err) => {
+                if !matches!(err, Error::RemoteResetDesired) {
+                    console::log_1(&format!(
+                        "ClientInner::on_message(channel_id={channel_id}): framing error: {err:?}"
+                    ).into());
+                }
+                return;
+            }
+        } // on drop, `framing` adds the protobuf frame to `self.perf_rw.write_buffers`
+
+        send(channel_id, rw.write_buffers.as_mut());
+    }
+
+    fn on_time_elapsed(&mut self) {
+        let Some(channel_id) = self.perf_channel else { return; };
+        let rw = &mut self.perf_rw;
+
+        while rw.wake_up_after.map_or(false, |wua| rw.now >= wua) {
+            rw.now = Instant::now();
+            rw.wake_up_after = None;
+
+            match self.perf_framing.read_write(rw) {
+                Ok(mut framing) => {
+                    let Some(stream) = self.perf_stream.take() else { return; };
+                    self.perf_stream = stream.read_write(&mut framing);
+
+                    if self.perf_stream.is_none() {
+                        self.perf_channel = None;
+                    }
+                }
+                Err(err) => {
+                    if !matches!(err, Error::RemoteResetDesired) {
+                        console::log_1(&format!(
+                            "ClientInner::on_time_elapsed(): framing error: {err:?}"
+                        ).into());
+                    }
+                    return;
+                }
+            } // on drop, `framing` adds the protobuf frame to `rw.write_buffers`
+
+            send(channel_id, rw.write_buffers.as_mut());
         }
+    }
 
-        let rw = self.buffers.get_mut(&channel_id).unwrap();
+    fn drive_handshake(&mut self, channel_id: DatachannelId, data: &[u8]) {
+        console::log_1(&"ClientInner::drive_handshake(): doin' the ting".into());
+
+        let Some(task) = self.task.as_mut() else { return; };
+        let rw = &mut self.handshake_rw;
         rw.incoming_buffer.extend_from_slice(data);
         rw.now = Instant::now();
 
-        let mut remove_buffer = false;
+        // let mut remove_buffer = false;
 
-        self.task = loop {
-            let mut task = match self.task.take() {
-                Some(task) => task,
-                None => {
-                    console::log_1(&format!(
-                        "ClientInner::on_message(channel_id={channel_id}): task disappeared, bailing out"
-                    ).into());
-                    break None;
-                }
-            };
+        // self.task = loop {
+        //     let mut task = match self.task.take() {
+        //         Some(task) => task,
+        //         None => {
+        //             console::log_1(
+        //                 &"ClientInner::drive_handshake(): task disappeared, bailing out".into()
+        //             );
+        //             break None;
+        //         }
+        //     };
 
             if matches!(
                 task.substream_read_write(&channel_id, rw),
                 collection::SubstreamFate::Reset,
             ) {
-                // console::log_1(&format!(
-                //     "ClientInner::on_message(channel_id={channel_id}): channel has been reset"
-                // ).into());
-                remove_buffer = true;
-                break Some(task);
-            }
+                self.handshake_done = true;
 
-            let mut got_coordinator_msg = true;
-            let mut got_connection_msg = true;
-            let mut got_network_event = true;
-
-            let mut task = match task.pull_message_to_coordinator() {
-                (Some(task), Some(msg)) => {
-                    self.network.inject_connection_message( self.connection_id.unwrap(), msg);
-                    task
-                }
-                (Some(task), None) => {
-                    got_coordinator_msg = false;
-                    task
-                }
-                (None, _) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_message(channel_id={channel_id}): task consumed itself in pull_message_to_coordinator() 🤷"
-                    ).into());
-                    break None;
-                }
-            };
-
-            match self.network.next_event() {
-                Some(collection::Event::HandshakeFinished { id, peer_id }) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_message(channel_id={channel_id}): handshake on connection {id:?} finished! peer ID: {peer_id}"
-                    ).into());
-                }
-                Some(collection::Event::InboundNegotiated {
-                         protocol_name,
-                         substream_id,
-                         ..
-                     }) => {
-                    // console::log_1(&format!(
-                    //     "ClientInner::on_message(channel_id={channel_id}): inbound negotiated protocol {protocol_name}"
-                    // ).into());
-                    if protocol_name == "/ipfs/ping/1.0.0" {
-                        self.network.accept_inbound(substream_id, collection::InboundTy::Ping);
-                    } else {
-                        self.network.reject_inbound(substream_id);
+                match createDatachannel() {
+                    Ok(n) => {
+                        self.perf_channel = Some(n.as_f64().unwrap() as DatachannelId);
+                    }
+                    Err(err) => {
+                        console::log_1(&format!(
+                            "ClientInner::drive_handshake(): createDatachannel() failed: {err:?}"
+                        ).into());
                     }
                 }
-                Some(collection::Event::InboundError{ id, error }) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_message(channel_id={channel_id}): inbound error on connection {id:?}: {error:?}",
-                    ).into());
-                }
-                Some(collection::Event::PingOutSuccess{ id, ping_time }) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_message(channel_id={channel_id}): outbound ping on connection {id:?} succeeded. RTT: {ping_time:?}",
-                    ).into());
-                }
-                Some(collection::Event::PingOutFailed{ id }) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_message(channel_id={channel_id}): outbound ping on connection {id:?} failed",
-                    ).into());
-                }
-                Some(collection::Event::NotificationsInOpen { substream_id, .. }) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_message(channel_id={channel_id}): remote wants to open notifications substream {substream_id:?}",
-                    ).into());
-                }
-                None => {
-                    got_network_event = false;
-                }
-                _ => {
-                    console::log_1(&format!(
-                        "ClientInner::on_message(channel_id={channel_id}): some other stuff happened, will keep looping"
-                    ).into());
-                }
+
+                // remove_buffer = true;
+                // break Some(task);
             }
 
-            match self.network.pull_message_to_connection() {
-                Some((_, msg)) => {
-                    task.inject_coordinator_message(&Instant::now(), msg);
+        //     let mut got_coordinator_msg = true;
+        //     let mut got_connection_msg = true;
+        //     let mut got_network_event = true;
+        //
+        //     let mut task = match task.pull_message_to_coordinator() {
+        //         (Some(task), Some(msg)) => {
+        //             self.network.inject_connection_message( self.connection_id.unwrap(), msg);
+        //             task
+        //         }
+        //         (Some(task), None) => {
+        //             got_coordinator_msg = false;
+        //             task
+        //         }
+        //         (None, _) => {
+        //             console::log_1(
+        //                 &"ClientInner::drive_handshake(): task consumed itself in pull_message_to_coordinator() 🤷".into()
+        //             );
+        //             break None;
+        //         }
+        //     };
+        //
+        //     match self.network.next_event() {
+        //         Some(collection::Event::HandshakeFinished { id, peer_id }) => {
+        //             console::log_1(&format!(
+        //                 "ClientInner::drive_handshake(): handshake on connection {id:?} finished! peer ID: {peer_id}"
+        //             ).into());
+        //
+        //             if let Err(err) = createDatachannel() {
+        //                 console::log_1(&format!(
+        //                     "ClientInner::drive_handshake(): createDatachannel() failed: {err:?}"
+        //                 ).into());
+        //             }
+        //         }
+        //         None => {
+        //             got_network_event = false;
+        //         }
+        //         _ => {
+        //             console::log_1(
+        //                 &"ClientInner::drive_handshake(): some other stuff happened, will keep looping".into()
+        //             );
+        //         }
+        //     }
+        //
+        //     match self.network.pull_message_to_connection() {
+        //         Some((_, msg)) => {
+        //             task.inject_coordinator_message(&Instant::now(), msg);
+        //         }
+        //         None => got_connection_msg = false
+        //     }
+        //
+        //     if !got_coordinator_msg && !got_connection_msg && !got_network_event {
+        //         break Some(task);
+        //     }
+        //
+        //     self.task = Some(task);
+        // };
 
-                    // let subs_wanted = task.desired_outbound_substreams();
-                    // if subs_wanted > 0 {
-                    //     console::log_1(&format!(
-                    //         "ClientInner::on_message(channel_id={channel_id}): desired outbound substreams {subs_wanted} after task.inject_coordinator_message()"
-                    //     ).into());
-                    // }
-                }
-                None => got_connection_msg = false
-            }
-
-            if !got_coordinator_msg && !got_connection_msg && !got_network_event {
-                // console::log_1(&format!(
-                //     "ClientInner::on_message(channel_id={channel_id}): no messages or events left"
-                // ).into());
-                break Some(task);
-            }
-
-            self.task = Some(task);
-        };
-
-        if remove_buffer {
-            self.buffers.remove(&channel_id);
-        } else {
+        // if remove_buffer {
+        //     self.buffers.remove(&channel_id);
+        // } else {
             send(channel_id, rw.write_buffers.as_mut());
-        }
-    }
-
-    fn on_time_elapsed(&mut self, now: Instant) {
-        let Some(task) = self.task.as_mut() else { return; };
-        let mut remove_buffers = Vec::new();
-
-        for (channel_id, rw) in self.buffers.iter_mut() {
-            if rw.wake_up_after.map_or(true, |wua| now < wua) {
-                continue;
-            }
-
-            rw.now = now;
-            rw.wake_up_after = None;
-
-            if matches!(
-                task.substream_read_write(channel_id, rw),
-                collection::SubstreamFate::Reset,
-            ) {
-                console::log_1(&format!(
-                    "ClientInner::on_time_elapsed(): channel {channel_id} has been reset during wakeup"
-                ).into());
-                remove_buffers.push(*channel_id);
-                continue;
-            }
-
-            send(*channel_id, rw.write_buffers.as_mut());
-        }
-
-        remove_buffers.iter().for_each(|channel_id| { self.buffers.remove(channel_id); });
-
-        self.open_substreams();
-    }
-
-    fn open_substreams(&mut self) {
-        let Some(task) = self.task.as_mut() else { return; };
-        let mut remove_buffers = Vec::new();
-
-        for _ in 0..task.desired_outbound_substreams() {
-            match createDatachannel() {
-                Ok(n) => {
-                    let sub_id = n.as_f64().unwrap() as DatachannelId;
-                    task.add_substream(sub_id, true);
-
-                    let rw = self
-                        .buffers
-                        .entry(sub_id)
-                        .or_insert_with(empty_read_write);
-
-                    if matches!(
-                        task.substream_read_write(&sub_id, rw),
-                        collection::SubstreamFate::Reset,
-                    ) {
-                        // console::log_1(&format!(
-                        //     "ClientInner::open_substreams(): channel {sub_id} has been reset"
-                        // ).into());
-                        remove_buffers.push(sub_id);
-                    }
-                },
-                Err(err) => {
-                    console::log_1(&format!(
-                        "ClientInner::open_substreams(): createDatachannel() failed: {err:?}"
-                    ).into());
-                }
-            };
-        }
-
-        remove_buffers.iter().for_each(|channel_id| { self.buffers.remove(channel_id); });
+        // }
     }
 }
 
