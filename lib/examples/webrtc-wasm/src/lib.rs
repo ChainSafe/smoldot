@@ -325,43 +325,11 @@ struct ClientInner {
 impl ClientInner {
     // datachannel was opened by the remote
     fn on_datachannel_open(&mut self, channel_id: DatachannelId) {
-        // console::log_1(&format!("data channel {channel_id} opened").into());
-
-        if self.task.is_none() {
-            console::log_1(&format!(
-                "ClientInner::on_data_channel_open(channel_id={channel_id}): no task, bailing out"
-            ).into());
-            return;
-        }
-
-        self.buffers.insert(channel_id, empty_read_write());
-
-        let task = self.task.as_mut().unwrap();
+        let Some(task) = self.task.as_mut() else { return; };
         task.add_substream(channel_id, false);
 
-        for _ in 0..task.desired_outbound_substreams() {
-            match createDatachannel() {
-                Ok(n) => {
-                    let sub_id = n.as_f64().unwrap() as DatachannelId;
-                    task.add_substream(sub_id, true);
-
-                    let rw = self
-                        .buffers
-                        .entry(sub_id)
-                        .or_insert_with(empty_read_write);
-
-                    // Docs say we should call task.desired_outbound_substreams() after
-                    // calling task.substream_read_write().
-                    // Instead of doing it here, we do it in on_datachannel_ready().
-                    let _ /* FIXME */ = task.substream_read_write(&sub_id, rw);
-                },
-                Err(err) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_data_channel_open(channel_id={channel_id}): createDatachannel() failed: {err:?}"
-                    ).into());
-                }
-            };
-        }
+        self.buffers.insert(channel_id, empty_read_write());
+        self.open_substreams();
 
         self.task = loop {
             let task = match self.task.take() {
@@ -486,18 +454,16 @@ impl ClientInner {
 
     fn on_datachannel_close(&mut self, channel_id: DatachannelId) {
         console::log_1(&format!("data channel {channel_id} closed").into());
-        if let Some(task) = &mut self.task {
-            task.reset_substream(&channel_id); // TODO pull msg for coordinator
-            self.buffers.remove(&channel_id);
-        }
+        let Some(task) = self.task.as_mut() else { return; };
+        task.reset_substream(&channel_id); // TODO pull msg for coordinator
+        self.buffers.remove(&channel_id);
     }
 
     fn on_datachannel_error(&mut self, channel_id: DatachannelId, msg: js_sys::JsString) {
         console::log_1(&format!("data channel {channel_id} error: {msg}").into());
-        if let Some(task) = &mut self.task {
-            task.reset_substream(&channel_id); // TODO pull msg for coordinator
-            self.buffers.remove(&channel_id);
-        }
+        let Some(task) = self.task.as_mut() else { return; };
+        task.reset_substream(&channel_id); // TODO pull msg for coordinator
+        self.buffers.remove(&channel_id);
     }
 
     fn on_message(&mut self, channel_id: DatachannelId, data: &[u8]) {
@@ -520,7 +486,7 @@ impl ClientInner {
         rw.incoming_buffer.extend_from_slice(data);
         rw.now = Instant::now();
 
-        let mut remove_channel = false;
+        let mut remove_buffer = false;
 
         self.task = loop {
             let mut task = match self.task.take() {
@@ -540,7 +506,7 @@ impl ClientInner {
                 // console::log_1(&format!(
                 //     "ClientInner::on_message(channel_id={channel_id}): channel has been reset"
                 // ).into());
-                remove_channel = true;
+                remove_buffer = true;
                 break Some(task);
             }
 
@@ -639,7 +605,7 @@ impl ClientInner {
             self.task = Some(task);
         };
 
-        if remove_channel {
+        if remove_buffer {
             self.buffers.remove(&channel_id);
         } else {
             send(channel_id, rw.write_buffers.as_mut());
@@ -647,12 +613,8 @@ impl ClientInner {
     }
 
     fn on_time_elapsed(&mut self, now: Instant) {
-        if self.task.is_none() {
-            return;
-        }
-
-        let task = &mut self.task.as_mut().unwrap();
-        let mut reset_channels = Vec::new();
+        let Some(task) = self.task.as_mut() else { return; };
+        let mut remove_buffers = Vec::new();
 
         for (channel_id, rw) in self.buffers.iter_mut() {
             if rw.wake_up_after.map_or(true, |wua| now < wua) {
@@ -669,14 +631,52 @@ impl ClientInner {
                 console::log_1(&format!(
                     "ClientInner::on_time_elapsed(): channel {channel_id} has been reset during wakeup"
                 ).into());
-                reset_channels.push(*channel_id);
+                remove_buffers.push(*channel_id);
                 continue;
             }
 
             send(*channel_id, rw.write_buffers.as_mut());
         }
 
-        reset_channels.iter().for_each(|channel_id| { self.buffers.remove(channel_id); });
+        remove_buffers.iter().for_each(|channel_id| { self.buffers.remove(channel_id); });
+
+        self.open_substreams();
+    }
+
+    fn open_substreams(&mut self) {
+        let Some(task) = self.task.as_mut() else { return; };
+        let mut remove_buffers = Vec::new();
+
+        for _ in 0..task.desired_outbound_substreams() {
+            match createDatachannel() {
+                Ok(n) => {
+                    let sub_id = n.as_f64().unwrap() as DatachannelId;
+                    task.add_substream(sub_id, true);
+
+                    let rw = self
+                        .buffers
+                        .entry(sub_id)
+                        .or_insert_with(empty_read_write);
+
+                    if matches!(
+                        task.substream_read_write(&sub_id, rw),
+                        collection::SubstreamFate::Reset,
+                    ) {
+                        // console::log_1(&format!(
+                        //     "ClientInner::open_substreams(): channel {sub_id} has been reset"
+                        // ).into());
+                        remove_buffers.push(sub_id);
+                    }
+                },
+                Err(err) => {
+                    console::log_1(&format!(
+                        "ClientInner::open_substreams(): createDatachannel() failed: {err:?}"
+                    ).into());
+                }
+            };
+        }
+
+        remove_buffers.iter().for_each(|channel_id| { self.buffers.remove(channel_id); });
     }
 }
 
