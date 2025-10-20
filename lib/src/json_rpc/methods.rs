@@ -36,8 +36,8 @@ use hashbrown::HashMap;
 /// On success, returns a JSON-encoded identifier for that request that must be passed back when
 /// emitting the response.
 pub fn parse_jsonrpc_client_to_server(
-    message: &str,
-) -> Result<(&str, MethodCall), ParseClientToServerError> {
+    message: &'_ str,
+) -> Result<(&'_ str, MethodCall<'_>), ParseClientToServerError<'_>> {
     let call_def = parse::parse_request(message).map_err(ParseClientToServerError::JsonRpcParse)?;
 
     // No notification is supported by this server. If the `id` field is missing in the request,
@@ -82,7 +82,9 @@ pub enum ParseClientToServerError<'a> {
 }
 
 /// Parses a JSON notification.
-pub fn parse_notification(message: &str) -> Result<ServerToClient, ParseNotificationError> {
+pub fn parse_notification(
+    message: &'_ str,
+) -> Result<ServerToClient<'_>, ParseNotificationError<'_>> {
     let call_def = parse::parse_request(message).map_err(ParseNotificationError::JsonRpcParse)?;
     let call = ServerToClient::from_defs(call_def.method, call_def.params_json)
         .map_err(ParseNotificationError::Method)?;
@@ -430,7 +432,7 @@ define_methods! {
     state_getKeysPaged(prefix: Option<HexString>, count: u32, start_key: Option<HexString>, hash: Option<HashHexString>) -> Vec<HexString> [state_getKeysPagedAt],
     state_getMetadata(hash: Option<HashHexString>) -> HexString,
     state_getPairs() -> (), // TODO:
-    state_getReadProof() -> (), // TODO:
+    state_getReadProof(keys: Vec<HexString>, at: Option<HashHexString>) -> ReadProof,
     state_getRuntimeVersion(at: Option<HashHexString>) -> RuntimeVersion<'a> [chain_getRuntimeVersion],
     state_getStorage(key: HexString, hash: Option<HashHexString>) -> HexString [state_getStorageAt],
     state_getStorageHash() -> () [state_getStorageHashAt], // TODO:
@@ -1045,6 +1047,12 @@ pub struct SystemHealth {
     pub is_syncing: bool,
     pub peers: u64,
     pub should_have_peers: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReadProof {
+    pub at: HashHexString,
+    pub proof: Vec<HexString>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

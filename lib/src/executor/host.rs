@@ -3078,14 +3078,13 @@ impl SignatureVerification {
                 })
             }
             SignatureVerificationAlgorithm::Sr25519V2 => {
+                let Ok(signature) = schnorrkel::Signature::from_bytes(self.signature().as_ref())
+                else {
+                    return false;
+                };
                 schnorrkel::PublicKey::from_bytes(self.public_key().as_ref()).map_or(false, |pk| {
-                    pk.verify_simple(
-                        b"substrate",
-                        self.message().as_ref(),
-                        &schnorrkel::Signature::from_bytes(self.signature().as_ref())
-                            .unwrap_or_else(|_| unreachable!()),
-                    )
-                    .is_ok()
+                    pk.verify_simple(b"substrate", self.message().as_ref(), &signature)
+                        .is_ok()
                 })
             }
             SignatureVerificationAlgorithm::Ecdsa => {
@@ -3554,7 +3553,7 @@ enum LogEmitInner {
 
 impl LogEmit {
     /// Returns the data that the runtime would like to print.
-    pub fn info(&self) -> LogEmitInfo {
+    pub fn info(&'_ self) -> LogEmitInfo<'_> {
         match self.log_entry {
             LogEmitInner::Num(n) => LogEmitInfo::Num(n),
             LogEmitInner::Utf8 { str_ptr, str_size } => LogEmitInfo::Utf8(LogEmitInfoStr {
