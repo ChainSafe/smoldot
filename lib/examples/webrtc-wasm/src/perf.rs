@@ -63,13 +63,27 @@ impl PerfStream {
                 console::log_1(&"PerfStream::read_write2(): sending number of bytes, upload".into());
                 read_write.write_out(Vec::from(self.upload_bytes.to_be_bytes()));
                 read_write.wake_up_asap();
-                Some(PerfStreamInner::BytesUpload)
+                Some(PerfStreamInner::BytesUpload(self.upload_bytes))
             },
-            PerfStreamInner::BytesUpload => {
-                console::log_1(&"PerfStream::read_write2(): sending bytes, upload".into());
-                read_write.write_out(vec![0u8; self.upload_bytes as usize]);
+            PerfStreamInner::BytesUpload(expected_bytes) => {
+                if expected_bytes == self.upload_bytes {
+                    console::log_1(&format!(
+                        "PerfStream::read_write2(): starting upload of {} bytes",
+                        self.upload_bytes,
+                    ).into());
+                }
+
+                let chunk_size: usize = 1024;
+                read_write.write_out(vec![0u8; chunk_size]);
                 read_write.wake_up_asap();
-                Some(PerfStreamInner::NumberOfBytesDownload)
+
+                let remaining_bytes = expected_bytes.saturating_sub(chunk_size as u64);
+                if remaining_bytes > 0 {
+                    Some(PerfStreamInner::BytesUpload(remaining_bytes))
+                } else {
+                    console::log_1(&"PerfStream::read_write2(): done uploading".into());
+                    Some(PerfStreamInner::NumberOfBytesDownload)
+                }
             },
             PerfStreamInner::NumberOfBytesDownload => {
                 console::log_1(&"PerfStream::read_write2(): sending number of bytes, download".into());
@@ -107,7 +121,7 @@ impl PerfStream {
 enum PerfStreamInner {
     Negotiating(multistream_select::InProgress<String>),
     NumberOfBytesUpload,
-    BytesUpload,
+    BytesUpload(u64),
     NumberOfBytesDownload,
     BytesDownload(u64),
 }
