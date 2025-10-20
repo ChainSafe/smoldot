@@ -81,18 +81,24 @@ impl PerfStream {
                 // This should cause WebRtcFraming to include the FIN flag in the outgoing message.
                 // read_write.write_bytes_queueable = None;
 
-                Some(PerfStreamInner::BytesDownload)
+                Some(PerfStreamInner::BytesDownload(self.download_bytes))
             },
-            PerfStreamInner::BytesDownload => {
-                console::log_1(&"PerfStream::read_write2(): receiving bytes, download".into());
-                if read_write.incoming_buffer.len() != self.download_bytes as usize {
-                    console::log_1(&format!(
-                        "PerfStream::read_write2(): expected {} bytes in incoming_buffer but got {}",
-                        self.download_bytes,
-                        read_write.incoming_buffer.len(),
-                    ).into());
+            PerfStreamInner::BytesDownload(expected_bytes) => {
+                console::log_1(&format!(
+                    "PerfStream::read_write2(): expected {} download bytes, incoming_buffer has {}",
+                    expected_bytes,
+                    read_write.incoming_buffer.len(),
+                ).into());
+
+                let remaining_bytes = expected_bytes.saturating_sub(read_write.incoming_buffer.len() as u64);
+                if remaining_bytes > 0 {
+                    console::log_1(&"PerfStream::read_write2(): will keep downloading".into());
+                    read_write.discard_all_incoming();
+                    Some(PerfStreamInner::BytesDownload(remaining_bytes))
+                } else {
+                    console::log_1(&"PerfStream::read_write2(): done downloading".into());
+                    None
                 }
-                None
             },
         }
     }
@@ -103,7 +109,7 @@ enum PerfStreamInner {
     NumberOfBytesUpload,
     BytesUpload,
     NumberOfBytesDownload,
-    BytesDownload,
+    BytesDownload(u64),
 }
 
 impl PerfStreamInner {
