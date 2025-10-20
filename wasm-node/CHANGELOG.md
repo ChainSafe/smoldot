@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 2.0.39 - 2025-09-15
+
+### Fixed
+
+- Fix panic when executing proofs in some situations caused by the proof analysis not producing a correct value. ([#2176](https://github.com/smol-dot/smoldot/pull/2176))
+- When smoldot panics, this will now lead to exceptions being thrown from the public API in most situations, rather than the whole JavaScript process terminating. ([#2177](https://github.com/smol-dot/smoldot/pull/2177))
+
+## 2.0.38 - 2025-09-03
+
+### Fixed
+
+- Fix panic when an invalid SR25519 signature is passed to `ext_crypto_sr25519_verify_version_2`. ([#2170](https://github.com/smol-dot/smoldot/pull/2170))
+
+## 2.0.37 - 2025-08-29
+
+### Changed
+
+- The `state_getReadProof` legacy JSON-RPC function is now properly implemented. ([#2136](https://github.com/smol-dot/smoldot/pull/2136))
+
 ## 2.0.36 - 2025-06-06
 
 ### Fixed
