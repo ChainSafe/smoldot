@@ -42,10 +42,14 @@ extern "C" {
 }
 
 #[wasm_bindgen]
-pub async fn run_client(peer_address: String) -> Result<(), String> {
+pub async fn run_client(
+    upload_bytes: u64,
+    download_bytes: u64,
+    peer_address: String,
+) -> Result<(), String> {
     console::log_1(&format!("dialing: {}", peer_address).into());
 
-    let mut client = Client::new(peer_address)
+    let mut client = Client::new(upload_bytes, download_bytes, peer_address)
         .await
         .map_err(|e| format!("client error: {:?}", e))?;
 
@@ -104,7 +108,11 @@ struct Client {
 }
 
 impl Client {
-    async fn new(peer_address: String) -> Result<Self, String> {
+    async fn new(
+        upload_bytes: u64,
+        download_bytes: u64,
+        peer_address: String,
+    ) -> Result<Self, String> {
         let mut rng = StdRng::seed_from_u64(0xC0FFEE);
         let mut randomness_seed = [0u8; 32];
         rng.fill_bytes(&mut randomness_seed);
@@ -154,7 +162,7 @@ impl Client {
                 perf_channel: None,
                 perf_rw: empty_read_write(),
                 perf_framing: webrtc_framing::WebRtcFraming::new(),
-                perf_stream: Some(perf::PerfStream::new()),
+                perf_stream: Some(perf::PerfStream::new(upload_bytes, download_bytes)),
             })),
         })
     }

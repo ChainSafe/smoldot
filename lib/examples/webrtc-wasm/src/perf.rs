@@ -7,12 +7,16 @@ use web_sys::console;
 pub const PROTOCOL_NAME: &str = "/litep2p-perf/1.0.0";
 
 pub(crate) struct PerfStream {
+    upload_bytes: u64,
+    download_bytes: u64,
     inner: PerfStreamInner
 }
 
 impl PerfStream {
-    pub fn new() -> Self {
+    pub fn new(upload_bytes: u64, download_bytes: u64) -> Self {
         Self {
+            upload_bytes,
+            download_bytes,
             inner: PerfStreamInner::new(),
         }
     }
@@ -21,7 +25,12 @@ impl PerfStream {
         self,
         read_write: &mut ReadWrite<Instant>,
     ) -> Option<Self> {
+        let upload_bytes = self.upload_bytes;
+        let download_bytes = self.download_bytes;
+
         self.read_write2(read_write).map(|inner| PerfStream {
+            upload_bytes,
+            download_bytes,
             inner,
         })
     }
@@ -43,27 +52,28 @@ impl PerfStream {
                         Some(PerfStreamInner::NumberOfBytesUpload)
                     },
                     Ok(multistream_select::Negotiation::NotAvailable) => None, // log?
-                    Err(_) => None, // FIXME: handle error
+                    Err(err) => {
+                        console::log_1(&format!("kaput: {:?}", err).into());
+                        None
+                    },
                     _ => unreachable!("probably...")
                 }
             }
             PerfStreamInner::NumberOfBytesUpload => {
                 console::log_1(&"PerfStream::read_write2(): sending number of bytes, upload".into());
-                let num_bytes = 1024_u64; // FIXME: make configurable
-                read_write.write_out(Vec::from(num_bytes.to_be_bytes()));
+                read_write.write_out(Vec::from(self.upload_bytes.to_be_bytes()));
                 read_write.wake_up_asap();
                 Some(PerfStreamInner::BytesUpload)
             },
             PerfStreamInner::BytesUpload => {
                 console::log_1(&"PerfStream::read_write2(): sending bytes, upload".into());
-                read_write.write_out(vec![0u8; 1024]);
+                read_write.write_out(vec![0u8; self.upload_bytes as usize]);
                 read_write.wake_up_asap();
                 Some(PerfStreamInner::NumberOfBytesDownload)
             },
             PerfStreamInner::NumberOfBytesDownload => {
                 console::log_1(&"PerfStream::read_write2(): sending number of bytes, download".into());
-                let num_bytes = 1024_u64; // FIXME: make configurable
-                read_write.write_out(Vec::from(num_bytes.to_be_bytes()));
+                read_write.write_out(Vec::from(self.download_bytes.to_be_bytes()));
 
                 // This causes WebRtcFraming to include the FIN flag in the outgoing message.
                 read_write.write_bytes_queueable = None;
@@ -72,9 +82,10 @@ impl PerfStream {
             },
             PerfStreamInner::BytesDownload => {
                 console::log_1(&"PerfStream::read_write2(): receiving bytes, download".into());
-                if read_write.incoming_buffer.len() != 1024 {
+                if read_write.incoming_buffer.len() != self.download_bytes as usize {
                     console::log_1(&format!(
-                        "PerfStream::read_write2(): expected 1024 bytes in incoming_buffer but got {}",
+                        "PerfStream::read_write2(): expected {} bytes in incoming_buffer but got {}",
+                        self.download_bytes,
                         read_write.incoming_buffer.len(),
                     ).into());
                 }

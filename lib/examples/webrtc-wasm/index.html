@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <title>Smoldot WebRTC WASM Demo</title>
     <style>
-        /* body {
+         body {
             font-family: Arial, sans-serif;
             max-width: 800px;
             margin: 0 auto;
@@ -21,7 +21,52 @@
         }
         button:hover {
             background-color: #0056b3;
-        } */
+        }
+        #main-controls {
+            width: fit-content;
+            margin-bottom: 20px;
+        }
+        #selectors-container {
+            display: flex;
+            gap: 20px;
+        }
+        fieldset {
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+            width: 300px;
+        }
+        legend {
+            font-weight: bold;
+            padding: 0 5px;
+        }
+        div {
+            margin-bottom: 10px;
+        }
+        #controls-container {
+            display: flex;
+            width: 100%;
+            margin-top: 20px;
+        }
+        #peerAddress {
+            flex-grow: 1;
+            min-width: 0;
+            margin-right: 10px;
+            font-size: 16px;
+            padding: 10px;
+        }
+        label {
+            margin-right: 10px;
+            cursor: pointer;
+        }
+        .customBytesInput {
+            margin-left: 5px;
+            width: 100px;
+        }
+        button {
+            margin-right: 10px;
+        }
         #output {
             margin-top: 20px;
             padding: 10px;
@@ -33,17 +78,65 @@
     </style>
 </head>
 <body>
-<h1>Smoldot WebRTC WASM</h1>
+<h1>Smoldot WebRTC WASM litep2p-perf Client</h1>
 
-<input
-        id="peerAddress"
-        type="text"
-        placeholder="Enter peer multiaddress"
->
-<button id="runDemo" onclick="runDemo()">Run WebRTC Demo</button>
+<div id="main-controls">
+    <div id="selectors-container">
+        <fieldset id="upload-fieldset" class="byte-selector">
+            <legend>Upload</legend>
 
-<div id="output"></div>
+            <div>
+                <input type="radio" id="kb1-upload" name="bytes-upload" checked value="1024">
+                <label for="kb1-upload">1 KB</label>
+            </div>
+            <div>
+                <input type="radio" id="mb1-upload" name="bytes-upload" value="1048576">
+                <label for="mb1-upload">1 MB</label>
+            </div>
+            <div>
+                <input type="radio" id="gb1-upload" name="bytes-upload" value="1073741824">
+                <label for="gb1-upload">1 GB</label>
+            </div>
+            <div>
+                <input type="radio" id="custom-upload" name="bytes-upload" value="custom">
+                <label for="custom-upload">Custom:</label>
+                <input type="number" id="customBytes-upload" name="customBytesValue-upload" class="customBytesInput" placeholder="Enter bytes">
+            </div>
+        </fieldset>
 
+        <fieldset id="download-fieldset" class="byte-selector">
+            <legend>Download</legend>
+
+            <div>
+                <input type="radio" id="kb1-download" name="bytes-download" checked value="1024">
+                <label for="kb1-download">1 KB</label>
+            </div>
+            <div>
+                <input type="radio" id="mb1-download" name="bytes-download" value="1048576">
+                <label for="mb1-download">1 MB</label>
+            </div>
+            <div>
+                <input type="radio" id="gb1-download" name="bytes-download" value="1073741824">
+                <label for="gb1-download">1 GB</label>
+            </div>
+            <div>
+                <input type="radio" id="custom-download" name="bytes-download" value="custom">
+                <label for="custom-download">Custom:</label>
+                <input type="number" id="customBytes-download" name="customBytesValue-download" class="customBytesInput" placeholder="Enter bytes">
+            </div>
+        </fieldset>
+    </div>
+
+    <div id="controls-container">
+        <input
+            id="peerAddress"
+            type="text"
+            placeholder="Enter peer multiaddress"
+        >
+        <button id="runDemo" onclick="runDemo()">Run WebRTC Demo</button>
+    </div>
+    <div id="output"></div>
+</div>
 
 <script type="module">
   import {multiaddr, CODE_IP4, CODE_UDP, CODE_CERTHASH} from 'https://esm.sh/@multiformats/multiaddr@12.5.1';
@@ -64,9 +157,14 @@
     }
 
     output.textContent += 'Running WebRTC demo...\n';
+
+    const uploadFieldset = document.getElementById('upload-fieldset');
+    const downloadFieldset = document.getElementById('download-fieldset');
+    const uploadBytes = getSelectedBytes(uploadFieldset);
+    const downloadBytes = getSelectedBytes(downloadFieldset);
     const peer = document.getElementById('peerAddress').value;
 
-    await run_client(peer).catch(error => {
+    await run_client(uploadBytes, downloadBytes, peer).catch(error => {
       output.textContent += `\n\n${error}\n`;
     });
   };
@@ -241,13 +339,13 @@
 
     dc.onclose = () => {
       globalThis.smoldotGlue.onDatachannelClose(dc.id);
-      delete channels[channelId];
+      delete channels[dc.id];
     }
 
     dc.onerror = err => {
       const msg = `${err}`;
       globalThis.smoldotGlue.onDatachannelError(dc.id, msg);
-      delete channels[channelId];
+      delete channels[dc.id];
     }
   }
 
@@ -313,6 +411,59 @@
     return s;
   }
 
+  function getSelectedBytes(fieldsetElement) {
+    const selectedRadio = fieldsetElement.querySelector('input[type="radio"]:checked');
+
+    if (!selectedRadio) {
+      const output = document.getElementById('output');
+      output.textContent += 'No bytes specified for a fieldset!\n';
+      return BigInt(0);
+    }
+
+    if (selectedRadio.value === 'custom') {
+      const customInput = fieldsetElement.querySelector('.customBytesInput');
+      return BigInt(parseInt(customInput.value) || 0);
+    } else {
+      return BigInt(parseInt(selectedRadio.value));
+    }
+  }
+</script>
+
+<script>
+  function initializeByteSelector(fieldsetElement) {
+    const customRadio = fieldsetElement.querySelector('input[value="custom"]');
+    const customInput = fieldsetElement.querySelector('.customBytesInput');
+    const otherRadios = fieldsetElement.querySelectorAll('input[type="radio"]:not([value="custom"])');
+
+    customInput.disabled = !customRadio.checked;
+
+    customRadio.addEventListener('change', () => {
+      if (customRadio.checked) {
+        customInput.disabled = false;
+        customInput.focus();
+      }
+    });
+
+    otherRadios.forEach(radio => {
+      radio.addEventListener('change', () => {
+        if (radio.checked) {
+          customInput.disabled = true;
+          customInput.value = '';
+        }
+      });
+    });
+
+    customInput.addEventListener('focus', () => {
+      customRadio.checked = true;
+      customInput.disabled = false;
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('.byte-selector').forEach(fieldset => {
+      initializeByteSelector(fieldset);
+    });
+  });
 </script>
 </body>
 </html>
