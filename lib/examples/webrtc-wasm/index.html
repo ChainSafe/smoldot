@@ -460,6 +460,33 @@
   }
 
   document.addEventListener('DOMContentLoaded', () => {
+    const setCustomValueFromParam = (fieldsetElement, value) => {
+      if (value === null) {
+        return;
+      }
+
+      const numericValue = parseInt(value, 10);
+      if (isNaN(numericValue)) {
+        return;
+      }
+
+      const customRadio = fieldsetElement.querySelector('input[value="custom"]');
+      const customInput = fieldsetElement.querySelector('.customBytesInput');
+
+      if (customRadio && customInput) {
+        customInput.value = numericValue;
+        customRadio.checked = true;
+      }
+    };
+
+    const urlParams = new URLSearchParams(window.location.search);
+
+    const uploadFieldset = document.getElementById('upload-fieldset');
+    const downloadFieldset = document.getElementById('download-fieldset');
+
+    setCustomValueFromParam(uploadFieldset, urlParams.get('upload_bytes'));
+    setCustomValueFromParam(downloadFieldset, urlParams.get('download_bytes'));
+
     document.querySelectorAll('.byte-selector').forEach(fieldset => {
       initializeByteSelector(fieldset);
     });
