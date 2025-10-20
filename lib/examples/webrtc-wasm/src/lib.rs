@@ -387,10 +387,11 @@ impl ClientInner {
     }
 
     fn on_message(&mut self, channel_id: DatachannelId, data: &[u8]) {
-        console::log_1(&format!(
-            "ClientInner::on_message(channel_id={channel_id}): got {} bytes",
-            data.len(),
-        ).into());
+        // This creates too many logs for large amounts of data. 🙈
+        // console::log_1(&format!(
+        //     "ClientInner::on_message(channel_id={channel_id}): got {} bytes",
+        //     data.len(),
+        // ).into());
 
         let rw = &mut self.perf_rw;
         rw.now = Instant::now();

@@ -84,15 +84,15 @@ impl PerfStream {
                 Some(PerfStreamInner::BytesDownload(self.download_bytes))
             },
             PerfStreamInner::BytesDownload(expected_bytes) => {
-                console::log_1(&format!(
-                    "PerfStream::read_write2(): expected {} download bytes, incoming_buffer has {}",
-                    expected_bytes,
-                    read_write.incoming_buffer.len(),
-                ).into());
+                if expected_bytes == self.download_bytes {
+                    console::log_1(&format!(
+                        "PerfStream::read_write2(): starting download of {} bytes",
+                        self.download_bytes,
+                    ).into());
+                }
 
                 let remaining_bytes = expected_bytes.saturating_sub(read_write.incoming_buffer.len() as u64);
                 if remaining_bytes > 0 {
-                    console::log_1(&"PerfStream::read_write2(): will keep downloading".into());
                     read_write.discard_all_incoming();
                     Some(PerfStreamInner::BytesDownload(remaining_bytes))
                 } else {
