@@ -2,7 +2,6 @@ mod perf;
 
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::rc::Rc;
 use std::time::Duration;
@@ -37,6 +36,8 @@ extern "C" {
 
     #[wasm_bindgen(catch)]
     fn createDatachannel() -> Result<js_sys::Number, JsValue>;
+
+    fn scheduleTick();
 
     fn now() -> js_sys::Number;
 }
@@ -346,24 +347,10 @@ impl ClientInner {
         self.perf_channel = Some(channel_id);
 
         self.perf_rw.now = Instant::now();
-        self.perf_rw.wake_up_after = None;
+        self.perf_rw.wake_up_asap();
 
-        match self.perf_framing.read_write(&mut self.perf_rw) {
-            Ok(mut framing) => {
-                let Some(stream) = self.perf_stream.take() else { return; };
-                self.perf_stream = stream.read_write(&mut framing);
-            }
-            Err(err) => {
-                if !matches!(err, Error::RemoteResetDesired) {
-                    console::log_1(&format!(
-                        "ClientInner::on_datachannel_ready(channel_id={channel_id}): framing error: {err:?}"
-                    ).into());
-                }
-                return;
-            }
-        } // on drop, `framing` adds the protobuf frame to `self.perf_rw.write_buffers`
-
-        send(channel_id, self.perf_rw.write_buffers.as_mut());
+        // Kick off protocol negotiation.
+        scheduleTick();
     }
 
     fn on_datachannel_close(&mut self, channel_id: DatachannelId) {
@@ -387,12 +374,6 @@ impl ClientInner {
     }
 
     fn on_message(&mut self, channel_id: DatachannelId, data: &[u8]) {
-        // This creates too many logs for large amounts of data. 🙈
-        // console::log_1(&format!(
-        //     "ClientInner::on_message(channel_id={channel_id}): got {} bytes",
-        //     data.len(),
-        // ).into());
-
         let rw = &mut self.perf_rw;
         rw.now = Instant::now();
         rw.wake_up_after = None;
@@ -413,20 +394,53 @@ impl ClientInner {
             }
         } // on drop, `framing` adds the protobuf frame to `self.perf_rw.write_buffers`
 
-        send(channel_id, rw.write_buffers.as_mut());
+        match send(channel_id, rw.write_buffers.as_mut()) {
+            Ok(sent) => {
+                rw.write_bytes_queued = rw.write_bytes_queued.saturating_sub(sent);
+                rw.write_bytes_queueable = Some(rw.write_bytes_queueable.unwrap_or(0) + sent);
+            },
+            Err(SendError::SendQueueFull(sent)) => {
+                // FIXME: DRY
+                rw.write_bytes_queued = rw.write_bytes_queued.saturating_sub(sent);
+                rw.write_bytes_queueable = Some(rw.write_bytes_queueable.unwrap_or(0) + sent);
+
+                console::log_1(&format!(
+                    "ClientInner::on_message(channel_id={channel_id}): send queue is full"
+                ).into());
+            },
+            Err(SendError::Unknown(msg)) => {
+                console::log_1(&format!(
+                    "ClientInner::on_message(channel_id={channel_id}): unknown send error: {msg}"
+                ).into());
+            }
+        }
     }
 
     fn on_time_elapsed(&mut self) {
-        let Some(channel_id) = self.perf_channel else { return; };
+        let Some(channel_id) = self.perf_channel else {
+            console::log_1(&"ClientInner::on_time_elapsed(): no perf_channel, bailing".into());
+            return;
+        };
         let rw = &mut self.perf_rw;
+        let mut total_sent = 0;
 
         while rw.wake_up_after.map_or(false, |wua| rw.now >= wua) {
+            /* arbitrarily chosen 5 MB */
+            if total_sent >= 5242880 {
+                console::log_1(&"ClientInner::on_time_elapsed(): sent 5 MB, waiting for send queue to drain".into());
+                return;
+            }
+
             rw.now = Instant::now();
             rw.wake_up_after = None;
 
             match self.perf_framing.read_write(rw) {
                 Ok(mut framing) => {
-                    let Some(stream) = self.perf_stream.take() else { return; };
+                    let Some(stream) = self.perf_stream.take() else {
+                        console::log_1(&"ClientInner::on_time_elapsed(): no perf_stream, guess we're done here".into());
+                        return;
+                    };
+
                     self.perf_stream = stream.read_write(&mut framing);
 
                     if self.perf_stream.is_none() {
@@ -443,130 +457,99 @@ impl ClientInner {
                 }
             } // on drop, `framing` adds the protobuf frame to `rw.write_buffers`
 
-            send(channel_id, rw.write_buffers.as_mut());
+            match send(channel_id, rw.write_buffers.as_mut()) {
+                Ok(sent) => {
+                    rw.write_bytes_queued = rw.write_bytes_queued.saturating_sub(sent);
+                    rw.write_bytes_queueable = Some(rw.write_bytes_queueable.unwrap_or(0) + sent);
+                    total_sent += sent;
+                },
+                Err(SendError::SendQueueFull(sent)) => {
+                    // FIXME: DRY
+                    rw.write_bytes_queued = rw.write_bytes_queued.saturating_sub(sent);
+                    rw.write_bytes_queueable = Some(rw.write_bytes_queueable.unwrap_or(0) + sent);
+
+                    console::log_1(&
+                        "ClientInner::on_time_elapsed(): send queue full, pausing sending"
+                    .into());
+                    return;
+                },
+                Err(SendError::Unknown(msg)) => {
+                    console::log_1(&format!(
+                        "ClientInner::on_time_elapsed(): unknown send error: {msg}"
+                    ).into());
+                    return;
+                }
+            }
+        }
+        if self.perf_stream.is_some() {
+            scheduleTick();
         }
     }
 
     fn drive_handshake(&mut self, channel_id: DatachannelId, data: &[u8]) {
-        console::log_1(&"ClientInner::drive_handshake(): doin' the ting".into());
-
         let Some(task) = self.task.as_mut() else { return; };
         let rw = &mut self.handshake_rw;
         rw.incoming_buffer.extend_from_slice(data);
         rw.now = Instant::now();
 
-        // let mut remove_buffer = false;
+        if matches!(
+            task.substream_read_write(&channel_id, rw),
+            collection::SubstreamFate::Reset,
+        ) {
+            self.handshake_done = true;
 
-        // self.task = loop {
-        //     let mut task = match self.task.take() {
-        //         Some(task) => task,
-        //         None => {
-        //             console::log_1(
-        //                 &"ClientInner::drive_handshake(): task disappeared, bailing out".into()
-        //             );
-        //             break None;
-        //         }
-        //     };
-
-            if matches!(
-                task.substream_read_write(&channel_id, rw),
-                collection::SubstreamFate::Reset,
-            ) {
-                self.handshake_done = true;
-
-                match createDatachannel() {
-                    Ok(n) => {
-                        self.perf_channel = Some(n.as_f64().unwrap() as DatachannelId);
-                    }
-                    Err(err) => {
-                        console::log_1(&format!(
-                            "ClientInner::drive_handshake(): createDatachannel() failed: {err:?}"
-                        ).into());
-                    }
+            match createDatachannel() {
+                Ok(n) => {
+                    self.perf_channel = Some(n.as_f64().unwrap() as DatachannelId);
                 }
-
-                // remove_buffer = true;
-                // break Some(task);
+                Err(err) => {
+                    console::log_1(&format!(
+                        "ClientInner::drive_handshake(): createDatachannel() failed: {err:?}"
+                    ).into());
+                }
             }
+        }
 
-        //     let mut got_coordinator_msg = true;
-        //     let mut got_connection_msg = true;
-        //     let mut got_network_event = true;
-        //
-        //     let mut task = match task.pull_message_to_coordinator() {
-        //         (Some(task), Some(msg)) => {
-        //             self.network.inject_connection_message( self.connection_id.unwrap(), msg);
-        //             task
-        //         }
-        //         (Some(task), None) => {
-        //             got_coordinator_msg = false;
-        //             task
-        //         }
-        //         (None, _) => {
-        //             console::log_1(
-        //                 &"ClientInner::drive_handshake(): task consumed itself in pull_message_to_coordinator() 🤷".into()
-        //             );
-        //             break None;
-        //         }
-        //     };
-        //
-        //     match self.network.next_event() {
-        //         Some(collection::Event::HandshakeFinished { id, peer_id }) => {
-        //             console::log_1(&format!(
-        //                 "ClientInner::drive_handshake(): handshake on connection {id:?} finished! peer ID: {peer_id}"
-        //             ).into());
-        //
-        //             if let Err(err) = createDatachannel() {
-        //                 console::log_1(&format!(
-        //                     "ClientInner::drive_handshake(): createDatachannel() failed: {err:?}"
-        //                 ).into());
-        //             }
-        //         }
-        //         None => {
-        //             got_network_event = false;
-        //         }
-        //         _ => {
-        //             console::log_1(
-        //                 &"ClientInner::drive_handshake(): some other stuff happened, will keep looping".into()
-        //             );
-        //         }
-        //     }
-        //
-        //     match self.network.pull_message_to_connection() {
-        //         Some((_, msg)) => {
-        //             task.inject_coordinator_message(&Instant::now(), msg);
-        //         }
-        //         None => got_connection_msg = false
-        //     }
-        //
-        //     if !got_coordinator_msg && !got_connection_msg && !got_network_event {
-        //         break Some(task);
-        //     }
-        //
-        //     self.task = Some(task);
-        // };
-
-        // if remove_buffer {
-        //     self.buffers.remove(&channel_id);
-        // } else {
-            send(channel_id, rw.write_buffers.as_mut());
-        // }
+        if let Err(SendError::Unknown(msg)) = send(channel_id, rw.write_buffers.as_mut()) {
+            console::log_1(&format!(
+                "ClientInner::drive_handshake(): unknown send error: {msg}"
+            ).into());
+        }
     }
 }
 
-fn send(channel_id: DatachannelId, write_buffers: &mut Vec<Vec<u8>>) {
+enum SendError {
+    SendQueueFull(usize),
+    Unknown(String),
+}
+
+fn send(channel_id: DatachannelId, write_buffers: &mut Vec<Vec<u8>>) -> Result<usize, SendError> {
+    let mut total = 0;
+    let mut err: Option<SendError> = None;
+
     write_buffers
         .drain(..)
         .filter(|chunk| !chunk.is_empty())
         .for_each(|chunk| {
+            if err.is_some() { return; }
+
             if let Err(e) = sendTo(channel_id, &chunk) {
-                console::error_1(&format!(
-                    "sending {} bytes to channel {channel_id} failed: {e:?}",
-                    chunk.len(),
-                ).into());
+                let msg = format!("{e:?}");
+
+                err = if msg.contains("send queue is full") {
+                    Some(SendError::SendQueueFull(total))
+                } else {
+                    Some(SendError::Unknown(msg))
+                }
+            } else {
+                total += chunk.len();
             }
-        }
-    );
+        });
+
+    match err {
+        Some(err) => Err(err),
+        None => Ok(total),
+    }
 }
 
 fn empty_read_write() -> ReadWrite<Instant> {

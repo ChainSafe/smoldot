@@ -265,6 +265,11 @@
 
     configureDatachannel(dc);
 
+    // Make sure we resume sending after pausing for the send queue to drain.
+    dc.onbufferedamountlow = () => {
+      globalThis.smoldotGlue.onTimeElapsed();
+    };
+
     return dc.id;
   }
 
@@ -318,14 +323,18 @@
     const {[CODE_IP4]: ip, [CODE_UDP]: port, [CODE_CERTHASH]: certhash} = componentsByCode;
     const answer = buildAnswer(ip, port, certhash, ufrag);
 
-    setInterval(() => {
-      globalThis.smoldotGlue.onTimeElapsed();
-    }, 100);
-
     await pc.setRemoteDescription(answer);
   }
 
   globalThis.dialWebRtcDirect = dialWebRtcDirect;
+
+  export function scheduleTick() {
+    setTimeout(() => {
+      globalThis.smoldotGlue.onTimeElapsed();
+    }, 100);
+  }
+
+  globalThis.scheduleTick = scheduleTick;
 
   function configureDatachannel(dc) {
     channels[dc.id] = dc;
@@ -340,13 +349,13 @@
     dc.onclose = () => {
       globalThis.smoldotGlue.onDatachannelClose(dc.id);
       delete channels[dc.id];
-    }
+    };
 
     dc.onerror = err => {
       const msg = `${err}`;
       globalThis.smoldotGlue.onDatachannelError(dc.id, msg);
       delete channels[dc.id];
-    }
+    };
   }
 
   function buildAnswer(ip, port, certhash, ufrag) {

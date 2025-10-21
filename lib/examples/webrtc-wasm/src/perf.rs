@@ -48,7 +48,7 @@ impl PerfStream {
                         Some(Negotiating(nego)),
                     Ok(multistream_select::Negotiation::Success) => {
                         console::log_1(&"PerfStream::read_write2(): done negotiating!".into());
-                        // read_write.wake_up_asap();
+                        read_write.wake_up_asap();
                         Some(PerfStreamInner::NumberOfBytesUpload)
                     },
                     Ok(multistream_select::Negotiation::NotAvailable) => None, // log?
@@ -73,7 +73,20 @@ impl PerfStream {
                     ).into());
                 }
 
-                let chunk_size: usize = 1024;
+                let chunk_size: usize = match read_write.write_bytes_queueable {
+                    Some(wbq) => {
+                        if wbq == 0 {
+                            console::log_1(&"PerfStream::read_write2(): zero bytes queueable".into());
+                            return Some(PerfStreamInner::BytesUpload(expected_bytes));
+                        }
+                        std::cmp::min(wbq, 1024)
+                    },
+                    None => {
+                        console::log_1(&"PerfStream::read_write2(): no bytes queueable".into());
+                        return None;
+                    }
+                };
+
                 read_write.write_out(vec![0u8; chunk_size]);
                 read_write.wake_up_asap();
 
