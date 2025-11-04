@@ -74,8 +74,6 @@
   const channels = {}; // channelId -> DataChannel
 
   export function sendTo(channelId, data) {
-    //console.log(`JS: sending ${data.length} bytes to channel ${channelId}: ${String(data)}`);
-
     const channel = channels[channelId];
 
     if (!channel) {
@@ -181,7 +179,6 @@
 
       event.channel.onmessage = dataEvent => {
         const data = new Uint8Array(dataEvent.data);
-        // console.log(`JS: ${data.length} bytes received on channel ${event.channel.id}: ${String(data)}`);
         globalThis.smoldotGlue.onMessage(event.channel.id, data);
       };
 
@@ -241,13 +238,13 @@
 
     dc.onclose = () => {
       globalThis.smoldotGlue.onDatachannelClose(dc.id);
-      delete channels[channelId];
+      delete channels[dc.id];
     }
 
     dc.onerror = err => {
       const msg = `${err}`;
       globalThis.smoldotGlue.onDatachannelError(dc.id, msg);
-      delete channels[channelId];
+      delete channels[dc.id];
     }
   }
 
@@ -313,6 +310,18 @@
     return s;
   }
 
+</script>
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const peerInput = document.getElementById('peerAddress');
+    const peerParam = urlParams.get('peer');
+
+    if (peerParam) {
+      peerInput.value = peerParam;
+      document.getElementById('runDemo').click();
+    }
+  });
 </script>
 </body>
 </html>

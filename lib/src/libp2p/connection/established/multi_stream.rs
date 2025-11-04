@@ -22,7 +22,7 @@ use super::{
 };
 use crate::{libp2p::connection::webrtc_framing, util};
 
-use alloc::{collections::VecDeque, string::String, vec::Vec, format};
+use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::{
     fmt,
     hash::Hash,
@@ -30,7 +30,6 @@ use core::{
     time::Duration,
 };
 use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
-use web_sys::console;
 pub use substream::InboundTy;
 
 /// State machine of a fully-established connection where substreams are handled externally.
@@ -281,10 +280,7 @@ where
         substream_id: &TSubId,
         read_write: &mut ReadWrite<TNow>,
     ) -> SubstreamFate {
-        // console::log_1(&"MultiStream::substream_read_write(): before unwrap()".into());
         let substream = self.in_substreams.get_mut(substream_id).unwrap();
-
-        // console::log_1(&"MultiStream::substream_read_write(): before assert".into());
 
         // In WebRTC, the reading and writing side is never closed.
         assert!(
@@ -292,11 +288,8 @@ where
                 && read_write.write_bytes_queueable.is_some()
         );
 
-        // console::log_1(&"MultiStream::substream_read_write(): after assert".into());
-
         // Reading/writing the ping substream is used to queue new outgoing pings.
         if Some(substream_id) == self.ping_substream.as_ref() {
-            // console::log_1(&"established::MultiStream::substream_read_write(): it's the ping substream!".into());
             if read_write.now >= self.next_ping {
                 let mut payload = [0u8; 32];
                 self.ping_payload_randomness.fill_bytes(&mut payload);

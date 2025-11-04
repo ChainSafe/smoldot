@@ -2482,7 +2482,6 @@ dependencies = [
  "wasmi",
  "wasmtime",
  "wat",
- "web-sys",
  "x25519-dalek",
  "zeroize",
 ]

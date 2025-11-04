@@ -5,8 +5,8 @@ use std::fmt::{Display, Formatter};
 use std::rc::Rc;
 use std::time::Duration;
 use smoldot::libp2p::{
-    PeerId, collection,
-    connection::{noise, webrtc_framing},
+    collection,
+    connection::noise,
     read_write::ReadWrite,
 };
 
@@ -288,15 +288,8 @@ impl Client {
             );
 
             inner.buffers.insert(0, empty_read_write());
-
             task.add_substream(0, true);
-            let (task_update, msg) = task.pull_message_to_coordinator(); // TODO: call in a loop until msg is None
-            if let Some(msg) = msg {
-                console::log_1(&"Client::run(): got an msg for coordinator from task".into());
-                inner.network.inject_connection_message(connection_id, msg)
-            }
-
-            inner.task = task_update;
+            inner.task = Some(task);
             inner.connection_id = Some(connection_id);
         }
 
@@ -354,32 +347,27 @@ impl ClientInner {
     }
 
     fn on_datachannel_close(&mut self, channel_id: DatachannelId) {
-        console::log_1(&format!("data channel {channel_id} closed").into());
+        console::log_1(&format!(
+            "ClientInner::on_datachannel_close(channel_id={channel_id}) channel closed"
+        ).into());
+
         let Some(task) = self.task.as_mut() else { return; };
-        task.reset_substream(&channel_id); // TODO pull msg for coordinator
+        task.reset_substream(&channel_id);
         self.buffers.remove(&channel_id);
     }
 
     fn on_datachannel_error(&mut self, channel_id: DatachannelId, msg: js_sys::JsString) {
-        console::log_1(&format!("data channel {channel_id} error: {msg}").into());
+        console::log_1(&format!(
+            "ClientInner::on_datachannel_error(channel_id={channel_id}): {msg}"
+        ).into());
+
         let Some(task) = self.task.as_mut() else { return; };
-        task.reset_substream(&channel_id); // TODO pull msg for coordinator
+        task.reset_substream(&channel_id);
         self.buffers.remove(&channel_id);
     }
 
     fn on_message(&mut self, channel_id: DatachannelId, data: &[u8]) {
-        // console::log_1(
-        //     &format!(
-        //         "ClientInner::on_message(channel_id={channel_id}): {} bytes received",
-        //         data.len()
-        //     )
-        //     .into(),
-        // );
-
         if !self.buffers.contains_key(&channel_id) {
-            // console::log_1(&format!(
-            //     "ClientInner::on_message(channel_id={channel_id}): no buffer, bailing out"
-            // ).into());
             return;
         }
 
@@ -404,9 +392,9 @@ impl ClientInner {
                 task.substream_read_write(&channel_id, rw),
                 collection::SubstreamFate::Reset,
             ) {
-                // console::log_1(&format!(
-                //     "ClientInner::on_message(channel_id={channel_id}): channel has been reset"
-                // ).into());
+                console::log_1(&format!(
+                    "ClientInner::on_message(channel_id={channel_id}): channel has been reset"
+                ).into());
                 remove_buffer = true;
                 break Some(task);
             }
@@ -433,11 +421,7 @@ impl ClientInner {
             };
 
             match self.network.next_event() {
-                Some(collection::Event::HandshakeFinished { id, peer_id }) => {
-                    console::log_1(&format!(
-                        "ClientInner::on_message(channel_id={channel_id}): handshake on connection {id:?} finished! peer ID: {peer_id}"
-                    ).into());
-                }
+                Some(collection::Event::HandshakeFinished { .. }) => {}
                 Some(collection::Event::InboundNegotiated {
                          protocol_name,
                          substream_id,
@@ -480,23 +464,11 @@ impl ClientInner {
             }
 
             match self.network.pull_message_to_connection() {
-                Some((_, msg)) => {
-                    task.inject_coordinator_message(&Instant::now(), msg);
-
-                    // let subs_wanted = task.desired_outbound_substreams();
-                    // if subs_wanted > 0 {
-                    //     console::log_1(&format!(
-                    //         "ClientInner::on_message(channel_id={channel_id}): desired outbound substreams {subs_wanted} after task.inject_coordinator_message()"
-                    //     ).into());
-                    // }
-                }
+                Some((_, msg)) => task.inject_coordinator_message(&Instant::now(), msg),
                 None => got_connection_msg = false
             }
 
             if !got_coordinator_msg && !got_connection_msg && !got_network_event {
-                // console::log_1(&format!(
-                //     "ClientInner::on_message(channel_id={channel_id}): no messages or events left"
-                // ).into());
                 break Some(task);
             }
 
@@ -560,9 +532,9 @@ impl ClientInner {
                         task.substream_read_write(&sub_id, rw),
                         collection::SubstreamFate::Reset,
                     ) {
-                        // console::log_1(&format!(
-                        //     "ClientInner::open_substreams(): channel {sub_id} has been reset"
-                        // ).into());
+                        console::log_1(&format!(
+                            "ClientInner::open_substreams(): channel {sub_id} has been reset"
+                        ).into());
                         remove_buffers.push(sub_id);
                     }
                 },

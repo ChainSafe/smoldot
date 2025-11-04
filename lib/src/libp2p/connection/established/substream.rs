@@ -26,14 +26,13 @@
 use crate::libp2p::{connection::multistream_select, read_write};
 use crate::util::leb128;
 
-use alloc::{borrow::ToOwned as _, collections::VecDeque, string::String, vec::Vec, format};
+use alloc::{borrow::ToOwned as _, collections::VecDeque, string::String, vec::Vec};
 use core::{
     fmt, mem,
     num::NonZero,
     ops::{Add, Sub},
     time::Duration,
 };
-// use web_sys::console;
 
 /// State machine containing the state of a single substream of an established connection.
 pub struct Substream<TNow> {
@@ -388,7 +387,6 @@ where
                 None,
             ),
             SubstreamInner::InboundNegotiatingAccept(nego, inbound_ty) => {
-                // console::log_1(&"Substream::read_write2(): matched SubstreamInner::InboundNegotiatingAccept".into());
                 match nego.read_write(read_write) {
                     Ok(multistream_select::Negotiation::InProgress(nego)) => (
                         Some(SubstreamInner::InboundNegotiatingAccept(nego, inbound_ty)),
@@ -400,7 +398,6 @@ where
                     }
                     Ok(multistream_select::Negotiation::Success) => match inbound_ty {
                         InboundTy::Ping => {
-                            // console::log_1(&"Substream::read_write2(): it's a ping!".into());
                             (
                                 Some(SubstreamInner::PingIn {
                                     payload_out: VecDeque::with_capacity(32),

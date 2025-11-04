@@ -845,10 +845,6 @@ where
         substream_id: &TSubId,
         read_write: &mut ReadWrite<TNow>,
     ) -> SubstreamFate {
-        #[cfg(target_arch = "wasm32")]
-        use web_sys::console;
-        use alloc::format;
-
         // In WebRTC, the reading and writing sides are never closed.
         // Note that the `established::MultiStream` state machine also performs this check, but
         // we do it here again because we're not necessarily in the ̀`established` state.
@@ -856,12 +852,6 @@ where
             read_write.expected_incoming_bytes.is_some()
                 && read_write.write_bytes_queueable.is_some()
         );
-
-        // #[cfg(target_arch = "wasm32")]
-        // console::log_1(&format!(
-        //     "MultiStreamConnectionTask::substream_read_write(): self.connection is Handshake: {}",
-        //     matches!(self.connection, MultiStreamConnectionTaskInner::Handshake { .. }),
-        // ).into());
 
         match &mut self.connection {
             MultiStreamConnectionTaskInner::Handshake {
@@ -887,48 +877,12 @@ where
                     handshake.take().unwrap().read_write(&mut with_framing)
                 };
 
-                // #[cfg(target_arch = "wasm32")]
-                // console::log_1(&format!(
-                //     "MultiStreamConnectionTask::substream_read_write(): read_write.write_buffers.is_empty(): {}",
-                //     read_write.write_buffers.is_empty()
-                // ).into());
-                // if let Some(wua) = &read_write.wake_up_after {
-                //     console::log_1(&format!(
-                //         "MultiStreamConnectionTask::substream_read_write(): read_write.wake_up_after.sub(read_write.now): {:?}",
-                //         wua.clone().sub(read_write.now.clone()),
-                //     ).into());
-                // } else {
-                //     console::log_1(&
-                //         "MultiStreamConnectionTask::substream_read_write(): read_write.wake_up_after is None"
-                //     .into());
-                // }
-                // #[cfg(target_arch = "wasm32")]
-                // console::log_1(&format!(
-                //     "MultiStreamConnectionTask::substream_read_write(): read_write.expected_incoming_bytes: {:?}",
-                //     read_write.expected_incoming_bytes,
-                // ).into());
-                // #[cfg(target_arch = "wasm32")]
-                // console::log_1(&format!(
-                //     "MultiStreamConnectionTask::substream_read_write(): read_write.incoming_buffer.len(): {}",
-                //     read_write.incoming_buffer.len(),
-                // ).into());
-
                 match handshake_outcome {
                     Ok(noise::NoiseHandshake::InProgress(handshake_update)) => {
                         *handshake = Some(handshake_update);
-                        // #[cfg(target_arch = "wasm32")]
-                        // console::log_1(&
-                        //     "MultiStreamConnectionTask::substream_read_write(): handshake in progress"
-                        // .into());
-
                         SubstreamFate::Continue
                     }
-                    Err(err) => {
-                        #[cfg(target_arch = "wasm32")]
-                        console::log_1(&format!(
-                            "MultiStreamConnectionTask::substream_read_write(): handshake error: {err}"
-                        ).into());
-
+                    Err(_err) => {
                         return SubstreamFate::Reset // TODO: /!\
                     },
                     Ok(noise::NoiseHandshake::Success {
@@ -941,9 +895,6 @@ where
                         for (substream_id, outbound) in extra_open_substreams.drain() {
                             established.add_substream(substream_id, outbound);
                         }
-
-                        // #[cfg(target_arch = "wasm32")]
-                        // console::log_1(&"MultiStreamConnectionTask::substream_read_write(): setting self.connection to MultiStreamConnectionTaskInner::Established".into());
 
                         self.connection = MultiStreamConnectionTaskInner::Established {
                             established,
@@ -983,10 +934,6 @@ where
                 }
             }
             MultiStreamConnectionTaskInner::Established { established, .. } => {
-                // console::log_1(&format!(
-                //     "MultiStreamConnectionTask::substream_read_write(): second MultiStreamConnectionTaskInner::Established matched. read_write.incoming_buffer.len(): {}",
-                //     read_write.incoming_buffer.len(),
-                // ).into());
                 established.substream_read_write(substream_id, read_write)
             }
             MultiStreamConnectionTaskInner::Handshake {

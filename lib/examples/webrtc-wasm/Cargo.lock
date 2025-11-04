@@ -1091,7 +1091,6 @@ dependencies = [
  "smallvec",
  "twox-hash",
  "wasmi",
- "web-sys",
  "x25519-dalek",
  "zeroize",
 ]
