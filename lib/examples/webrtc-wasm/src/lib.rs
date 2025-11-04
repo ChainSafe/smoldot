@@ -542,9 +542,6 @@ impl ClientInner {
                          substream_id,
                          ..
                      }) => {
-                    // console::log_1(&format!(
-                    //     "ClientInner::on_message(channel_id={channel_id}): inbound negotiated protocol {protocol_name}"
-                    // ).into());
                     if protocol_name == "/ipfs/ping/1.0.0" {
                         self.network.accept_inbound(substream_id, collection::InboundTy::Ping);
                     } else {
@@ -681,18 +678,25 @@ impl ClientInner {
 }
 
 fn send(channel_id: DatachannelId, write_buffers: &mut Vec<Vec<u8>>) {
+    let mut flattened = Vec::new();
+
     write_buffers
         .drain(..)
         .filter(|chunk| !chunk.is_empty())
         .for_each(|chunk| {
-            if let Err(e) = sendTo(channel_id, &chunk) {
-                console::error_1(&format!(
-                    "sending {} bytes to channel {channel_id} failed: {e:?}",
-                    chunk.len(),
-                ).into());
-            }
-        }
-    );
+            flattened.extend_from_slice(&chunk);
+        });
+
+    if flattened.is_empty() {
+        return;
+    }
+
+    if let Err(e) = sendTo(channel_id, &flattened) {
+        console::error_1(&format!(
+            "sending {} bytes to channel {channel_id} failed: {e:?}",
+            flattened.len(),
+        ).into());
+    }
 }
 
 fn empty_read_write() -> ReadWrite<Instant> {
