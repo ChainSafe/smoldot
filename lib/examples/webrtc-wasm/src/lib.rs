@@ -524,31 +524,33 @@ enum SendError {
 }
 
 fn send(channel_id: DatachannelId, write_buffers: &mut Vec<Vec<u8>>) -> Result<usize, SendError> {
-    let mut total = 0;
     let mut err: Option<SendError> = None;
+    let mut flattened = Vec::new();
 
     write_buffers
         .drain(..)
         .filter(|chunk| !chunk.is_empty())
         .for_each(|chunk| {
-            if err.is_some() { return; }
-
-            if let Err(e) = sendTo(channel_id, &chunk) {
-                let msg = format!("{e:?}");
-
-                err = if msg.contains("send queue is full") {
-                    Some(SendError::SendQueueFull(total))
-                } else {
-                    Some(SendError::Unknown(msg))
-                }
-            } else {
-                total += chunk.len();
-            }
+            flattened.extend_from_slice(&chunk);
         });
+
+    if flattened.is_empty() {
+        return Ok(0);
+    }
+
+    if let Err(e) = sendTo(channel_id, &flattened) {
+        let msg = format!("{e:?}");
+
+        err = if msg.contains("send queue is full") {
+            Some(SendError::SendQueueFull(0))
+        } else {
+            Some(SendError::Unknown(msg))
+        }
+    }
 
     match err {
         Some(err) => Err(err),
-        None => Ok(total),
+        None => Ok(flattened.len()),
     }
 }
 
