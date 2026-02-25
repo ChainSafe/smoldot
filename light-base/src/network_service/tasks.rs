@@ -392,6 +392,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                                 "connections",
                                 "connection-activity",
                                 address = address_string,
+                                substream_id,
                                 read = socket_read_write.read_bytes - read_bytes_before,
                                 written = socket_read_write.write_bytes_queued - written_bytes_before,
                                 wake_up_after = ?socket_read_write.wake_up_after.as_ref().map(|w| {
